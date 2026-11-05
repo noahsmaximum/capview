@@ -1285,6 +1285,7 @@ fn main() {
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn"),
     )
     .init();
+    log::info!("capview v{}", env!("CARGO_PKG_VERSION"));
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("event loop");

@@ -133,6 +133,7 @@ fn state_tag(ui: &mut egui::Ui, state: &CaptureState) {
 pub fn settings_panel(ui: &mut egui::Ui, v: &mut UiView) {
     let screen = ui.max_rect();
     egui::Area::new(egui::Id::unique("settings_card"))
+        .fade_in(false)
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-EDGE - 6.0, EDGE))
         .movable(false)
         .order(egui::Order::Foreground)
@@ -155,7 +156,7 @@ pub fn settings_panel(ui: &mut egui::Ui, v: &mut UiView) {
                         });
                     });
                     ui.horizontal(|ui| {
-                        ui.label(theme::margin_text("low-latency capture viewer // v0.1"));
+                        ui.label(theme::margin_text(concat!("low-latency capture viewer // v", env!("CARGO_PKG_VERSION"))));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             state_tag(ui, v.state)
                         });
@@ -928,6 +929,7 @@ pub fn stats_overlay(ctx: &egui::Context, v: &UiView) {
         _ => (egui::Align2::LEFT_TOP, egui::vec2(EDGE, EDGE)),
     };
     egui::Area::new(egui::Id::unique("stats"))
+        .fade_in(false)
         .anchor(anchor, off)
         .interactable(false)
         .order(egui::Order::Middle)
@@ -1184,6 +1186,7 @@ pub fn no_signal(ctx: &egui::Context, text: &str) {
         text
     };
     egui::Area::new(egui::Id::unique("nosignal"))
+        .fade_in(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(-3.0, -3.0))
         .interactable(false)
         .order(egui::Order::Background)
@@ -1214,6 +1217,7 @@ pub fn no_signal(ctx: &egui::Context, text: &str) {
 
 pub fn toast(ctx: &egui::Context, text: &str) {
     egui::Area::new(egui::Id::unique("toast"))
+        .fade_in(false)
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(-2.0, -30.0))
         .interactable(false)
         .order(egui::Order::Tooltip)
