@@ -1,0 +1,37 @@
+[package]
+name = "capview"
+version = "0.1.0"
+edition = "2024"
+description = "Low-latency, high-quality USB capture card viewer for Windows"
+license = "MIT"
+repository = "https://github.com/noahsmaximum/capview"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+cpal = "0.18"
+dirs = "7.0.0"
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+egui-winit = "0.37"
+env_logger = "0.11.11"
+log = "0.4.35"
+parking_lot = "0.13.0"
+png = "0.18.1"
+pollster = "1.0.1"
+ringbuf = "0.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "wgsl"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_MediaFoundation", "Win32_Media_KernelStreaming", "Win32_Media_DirectShow", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Media", "Win32_System_Performance", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_System_SystemInformation"] }
+windows-core = "0.62"
+winit = "0.30"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
