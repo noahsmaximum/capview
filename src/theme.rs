@@ -180,6 +180,7 @@ pub fn card(fill: Color32) -> Frame {
 pub enum Btn {
     Primary,
     Secondary,
+    Danger,
 }
 
 /// Chunky button that sinks into its hard shadow when pressed.
@@ -187,6 +188,7 @@ pub fn button(ui: &mut Ui, text: &str, kind: Btn) -> Response {
     let (fill, fg) = match kind {
         Btn::Primary => (COBALT, BONE),
         Btn::Secondary => (BONE, INK),
+        Btn::Danger => (VERMILLION, BONE),
     };
     let sh = 3.0;
     let galley = ui

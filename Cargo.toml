@@ -14,10 +14,13 @@ egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 egui-winit = "0.37"
 env_logger = "0.11.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 log = "0.4.35"
 parking_lot = "0.13.0"
 png = "0.18.1"
 pollster = "1.0.1"
+realfft = "3.5.1"
+rfd = "0.17.2"
 ringbuf = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

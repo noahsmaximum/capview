@@ -19,7 +19,14 @@ straight into the GPU, high-quality scaling, and a pixel-editorial UI.
   - Scaling: Lanczos 2/3, Catmull-Rom, Mitchell, sharp-bilinear, nearest. Anti-ringing, optional linear-light scaling, contrast-adaptive sharpening.
   - 10-bit output with dithering.
 - **Geometry:** fit / fill / stretch / integer / 1:1 sizing, aspect override, zoom, crop, rotate, flip.
+- **Presets:** save your setup by name, switch with Ctrl+1–9.
+  - A preset stores picture, scaling, frame/background, display and audio processing, but never which devices you use.
+- **Backgrounds and frames:**
+  - Background: an image behind the video (cover / contain / stretch / center / tile, plus dim) or a solid colour.
+  - Frame: built-in styles (outline, pixel card, hard shadow), or your own PNG scaled 9-slice, so one frame fits every size and aspect mode.
+  - The video shrinks to make room, so the frame is never clipped.
 - **Audio passthrough:** the card's audio input is matched automatically. Drift-corrected resampling keeps a fixed delay, which you can set.
+  - Clean-up for noisy cards: DC blocker, spectral hiss reduction (learns the card's noise while it's quiet) and a noise gate.
   - Includes a fix for MS2109 cards, which report "96 kHz mono" but actually send 48 kHz stereo.
 - **Robust:**
   - Recovers from unplug/replug and stream stalls.
@@ -53,9 +60,10 @@ It picks your capture card automatically. Webcams and virtual cameras are skippe
 | P | Pin on top |
 | I | Toggle integer scaling |
 | R | Reset picture |
+| Ctrl+1 … 9 | Load preset 1–9 |
 | Esc | Exit fullscreen / close settings |
 
-Settings are saved to `%APPDATA%\capview\settings.json`.
+Settings are saved to `%APPDATA%\capview\settings.json` one second after each change. Presets live in `presets\` and imported images in `images\` in the same folder.
 
 ## Tips
 
@@ -87,6 +95,7 @@ capture thread (MMCSS "Capture")            render thread (winit)
 | `CAPVIEW_FORMAT=<key>` | Force a mode, e.g. `YUY2 1920x1080@60/1`. |
 | `CAPVIEW_SHOT_PATH=<file>` | Screenshot destination. |
 | `CAPVIEW_NO_SOURCE=1` | Open no device (UI screenshots). |
+| `CAPVIEW_CONFIG_DIR=<folder>` | Use a separate settings/presets/images folder. |
 
 ## Credits
 

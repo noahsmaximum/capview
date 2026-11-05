@@ -33,6 +33,12 @@ pub enum UiAction {
     RestartAudio,
     OpenScreenshotFolder,
     Close,
+    PickBackground,
+    PickFrame,
+    SavePreset(String),
+    LoadPreset(String),
+    DeletePreset(String),
+    OpenPresetsFolder,
 }
 
 pub struct UiView<'a> {
@@ -48,11 +54,19 @@ pub struct UiView<'a> {
     pub audio_outputs: &'a [String],
     pub audio_active: Option<(&'a str, &'a str)>,
     pub audio_error: Option<String>,
+    pub audio_floor_db: Option<f32>,
+    pub audio_gate_open: Option<bool>,
+    pub audio_nr_ready: Option<bool>,
     pub adapter: &'a str,
     pub present_modes: &'a [PresentMode],
     pub ten_bit_available: bool,
     pub fullscreen: bool,
     pub stats: &'a Stats,
+    pub presets: &'a [String],
+    pub active_preset: Option<&'a str>,
+    pub preset_modified: bool,
+    pub preset_name: &'a mut String,
+    pub frame_loaded: bool,
     pub actions: &'a mut Vec<UiAction>,
 }
 
@@ -156,9 +170,11 @@ pub fn settings_panel(ui: &mut egui::Ui, v: &mut UiView) {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.set_width(PANEL_W - 10.0);
+                            presets_section(ui, v);
                             device_section(ui, v);
                             picture_section(ui, v);
                             scaling_section(ui, v);
+                            backdrop_section(ui, v);
                             display_section(ui, v);
                             audio_section(ui, v);
                             overlay_section(ui, v);
@@ -456,9 +472,6 @@ fn scaling_section(ui: &mut egui::Ui, v: &mut UiView) {
             theme::check(ui, &mut s.flip_h, "Horizontal");
             theme::check(ui, &mut s.flip_v, "Vertical");
         });
-        row(ui, "Letterbox", |ui| {
-            ui.color_edit_button_rgb(&mut s.background);
-        });
         ui.add_space(2.0);
         if theme::button(ui, "reset geometry", Btn::Secondary).clicked() {
             let d = Settings::default();
@@ -475,8 +488,169 @@ fn scaling_section(ui: &mut egui::Ui, v: &mut UiView) {
     });
 }
 
+fn presets_section(ui: &mut egui::Ui, v: &mut UiView) {
+    theme::section(ui, 0, "Presets", true, |ui| {
+        row(ui, "Preset", |ui| {
+            let cur = match v.active_preset {
+                Some(n) => ellipsize(n, 22),
+                None => "—".to_owned(),
+            };
+            egui::ComboBox::from_id_salt("preset").selected_text(cur).width(180.0).show_ui(ui, |ui| {
+                if v.presets.is_empty() {
+                    ui.label(RichText::new("No presets yet").color(INK_SOFT));
+                }
+                for (i, name) in v.presets.iter().enumerate() {
+                    let label = if i < 9 { format!("{} · {name}", i + 1) } else { name.clone() };
+                    let sel = v.active_preset == Some(name.as_str());
+                    if ui.selectable_label(sel, label).clicked() {
+                        v.actions.push(UiAction::LoadPreset(name.clone()));
+                    }
+                }
+            });
+            if v.active_preset.is_some() {
+                if v.preset_modified {
+                    theme::tag(ui, "modified", VERMILLION, BONE);
+                } else {
+                    theme::tag(ui, "saved", PINE, BONE);
+                }
+            }
+        });
+        row(ui, "Save as", |ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(v.preset_name)
+                    .hint_text("Preset name")
+                    .desired_width(150.0),
+            );
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let name = v.preset_name.trim().to_owned();
+            if (theme::button(ui, "save", Btn::Primary).clicked() || enter) && !name.is_empty() {
+                v.actions.push(UiAction::SavePreset(name));
+                v.preset_name.clear();
+            }
+        });
+        if let Some(active) = v.active_preset {
+            ui.horizontal(|ui| {
+                ui.add_space(LABEL_W + 8.0);
+                if theme::button(ui, "update", Btn::Secondary)
+                    .on_hover_text(format!("Overwrite \"{active}\" with the current settings"))
+                    .clicked()
+                {
+                    v.actions.push(UiAction::SavePreset(active.to_owned()));
+                }
+                // Two-step delete: first click arms, second (within 3 s) deletes.
+                let armed_id = egui::Id::unique(("delete_armed", active));
+                let armed_at: Option<f64> = ui.data(|d| d.get_temp(armed_id));
+                let now = ui.input(|i| i.time);
+                let armed = armed_at.is_some_and(|t| now - t < 3.0);
+                let label = if armed { "sure?" } else { "delete" };
+                let kind = if armed { Btn::Danger } else { Btn::Secondary };
+                if theme::button(ui, label, kind).clicked() {
+                    if armed {
+                        v.actions.push(UiAction::DeletePreset(active.to_owned()));
+                        ui.data_mut(|d| d.remove::<f64>(armed_id));
+                    } else {
+                        ui.data_mut(|d| d.insert_temp(armed_id, now));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
+                    }
+                }
+                if theme::button(ui, "folder", Btn::Secondary).clicked() {
+                    v.actions.push(UiAction::OpenPresetsFolder);
+                }
+            });
+        }
+        note(
+            ui,
+            "Presets keep picture, scaling, frame, display and audio processing — not which devices you use. Ctrl+1…9 loads them.",
+        );
+    });
+}
+
+fn backdrop_section(ui: &mut egui::Ui, v: &mut UiView) {
+    theme::section(ui, 4, "Background & frame", false, |ui| {
+        let s = &mut *v.settings;
+        row(ui, "Background", |ui| {
+            combo(ui, "bgmode", &mut s.background_mode, &[
+                (BackgroundMode::Color, "Solid colour"),
+                (BackgroundMode::Image, "Image"),
+            ]);
+        });
+        if s.background_mode == BackgroundMode::Image {
+            row(ui, "Image", |ui| {
+                let name = s.background_image.as_deref().map(crate::assets::short).unwrap_or_else(|| "none".into());
+                ui.label(RichText::new(ellipsize(&name, 20)).font(theme::mono(18.0)));
+                if theme::button(ui, "browse", Btn::Secondary).clicked() {
+                    v.actions.push(UiAction::PickBackground);
+                }
+            });
+            row(ui, "Fit", |ui| {
+                combo(ui, "bgfit", &mut s.background_fit, &[
+                    (ImageFit::Cover, "Cover (fill, crop)"),
+                    (ImageFit::Contain, "Contain"),
+                    (ImageFit::Stretch, "Stretch"),
+                    (ImageFit::Center, "Center (1:1)"),
+                    (ImageFit::Tile, "Tile"),
+                ]);
+            });
+            row(ui, "Dim", |ui| {
+                ui.add(egui::Slider::new(&mut s.background_dim, 0.0..=0.9).custom_formatter(|x, _| format!("{:.0}%", x * 100.0)));
+            });
+        }
+        row(ui, "Colour", |ui| {
+            ui.color_edit_button_rgb(&mut s.background);
+        });
+        ui.add_space(4.0);
+        row(ui, "Frame", |ui| {
+            combo(ui, "framestyle", &mut s.frame_style, &[
+                (FrameStyle::None, "None"),
+                (FrameStyle::Outline, "Outline"),
+                (FrameStyle::PixelCard, "Pixel card"),
+                (FrameStyle::HardShadow, "Hard shadow"),
+                (FrameStyle::Image, "Image (9-slice)"),
+            ]);
+        });
+        if s.frame_style == FrameStyle::Image {
+            row(ui, "Frame image", |ui| {
+                let name = s.frame_image.as_deref().map(crate::assets::short).unwrap_or_else(|| "none".into());
+                ui.label(RichText::new(ellipsize(&name, 20)).font(theme::mono(18.0)));
+                if theme::button(ui, "browse", Btn::Secondary).clicked() {
+                    v.actions.push(UiAction::PickFrame);
+                }
+            });
+            row(ui, "Corner size", |ui| {
+                ui.add(egui::DragValue::new(&mut s.frame_slice).range(1..=1024).suffix(" px"))
+                    .on_hover_text("Size of the frame image's corners. They stay sharp; the edges stretch.");
+            });
+        }
+        if matches!(s.frame_style, FrameStyle::Outline | FrameStyle::PixelCard | FrameStyle::Image) {
+            row(ui, "Thickness", |ui| {
+                ui.add(egui::Slider::new(&mut s.frame_thickness, 1.0..=160.0).suffix(" px").fixed_decimals(0));
+            });
+        }
+        if s.frame_style == FrameStyle::Image {
+            let max = s.frame_thickness;
+            row(ui, "Overlap", |ui| {
+                ui.add(egui::Slider::new(&mut s.frame_overlap, 0.0..=max).suffix(" px").fixed_decimals(0))
+                    .on_hover_text("Pull the frame over the video edge (hides rounded inner corners).");
+            });
+        }
+        if matches!(s.frame_style, FrameStyle::Outline | FrameStyle::HardShadow) {
+            row(ui, "Frame colour", |ui| {
+                ui.color_edit_button_rgb(&mut s.frame_color);
+            });
+        }
+        row(ui, "Margin", |ui| {
+            ui.add(egui::Slider::new(&mut s.video_inset, 0.0..=300.0).suffix(" px").fixed_decimals(0))
+                .on_hover_text("Extra space around the video so more background shows.");
+        });
+        if s.frame_style == FrameStyle::Image && s.frame_image.is_some() && !v.frame_loaded {
+            note(ui, "Loading frame…");
+        }
+        note(ui, "Frames wrap the video at every size and aspect mode; the video shrinks to make room.");
+    });
+}
+
 fn display_section(ui: &mut egui::Ui, v: &mut UiView) {
-    theme::section(ui, 4, "Display & latency", false, |ui| {
+    theme::section(ui, 5, "Display & latency", false, |ui| {
         let modes = v.present_modes.to_vec();
         let s = &mut *v.settings;
         row(ui, "Present", |ui| {
@@ -543,7 +717,7 @@ fn display_section(ui: &mut egui::Ui, v: &mut UiView) {
 }
 
 fn audio_section(ui: &mut egui::Ui, v: &mut UiView) {
-    theme::section(ui, 5, "Audio", false, |ui| {
+    theme::section(ui, 6, "Audio", false, |ui| {
         let s = &mut *v.settings;
         row(ui, "", |ui| {
             theme::check(ui, &mut s.audio_enabled, "Play capture audio");
@@ -598,6 +772,57 @@ fn audio_section(ui: &mut egui::Ui, v: &mut UiView) {
             theme::check(ui, &mut s.audio_ms2109_fix, "MS2109 fix (96k mono → 48k stereo)")
                 .on_hover_text("Cheap MacroSilicon cards mislabel their audio. Only applies when the input reports 96 kHz mono.");
         });
+        ui.add_space(2.0);
+        row(ui, "", |ui| {
+            theme::check(ui, &mut s.audio_dc_block, "Remove DC offset")
+                .on_hover_text("Some cards add a constant offset in their analog audio stage.");
+        });
+        row(ui, "", |ui| {
+            theme::check(ui, &mut s.audio_nr, "Hiss reduction (+11 ms)").on_hover_text(
+                "Learns the card's hiss while nothing plays, then pulls it down under game audio                  (spectral noise reduction). Adds ~11 ms of audio latency.",
+            );
+            if s.audio_nr {
+                match v.audio_nr_ready {
+                    Some(true) => theme::tag(ui, "learned", PINE, BONE),
+                    _ => theme::tag(ui, "learning", TAN, INK),
+                };
+            }
+        });
+        if s.audio_nr {
+            row(ui, "Strength", |ui| {
+                ui.add(egui::Slider::new(&mut s.audio_nr_strength, 0.0..=1.0).fixed_decimals(2));
+            });
+        }
+        row(ui, "", |ui| {
+            theme::check(ui, &mut s.audio_gate, "Noise gate")
+                .on_hover_text("Fades the card's hiss to silence when nothing is playing. 1 ms attack, so sounds aren't clipped.");
+            if s.audio_gate {
+                match v.audio_gate_open {
+                    Some(true) => theme::tag(ui, "open", PINE, BONE),
+                    Some(false) => theme::tag(ui, "closed", TAN, INK),
+                    None => theme::tag(ui, "off", TAN, INK),
+                };
+            }
+        });
+        if s.audio_gate {
+            row(ui, "Gate threshold", |ui| {
+                ui.add(egui::Slider::new(&mut s.audio_gate_db, -80.0..=-20.0).suffix(" dB").fixed_decimals(0));
+            });
+            row(ui, "Noise floor", |ui| match v.audio_floor_db {
+                Some(f) => {
+                    ui.label(RichText::new(format!("{f:.1} dBFS")).font(theme::mono(18.0)));
+                    if theme::button(ui, "set gate", Btn::Secondary)
+                        .on_hover_text("Threshold = measured floor + 8 dB. Measure while nothing is playing.")
+                        .clicked()
+                    {
+                        s.audio_gate_db = (f + 8.0).clamp(-80.0, -20.0).round();
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("measuring…").font(theme::mono(18.0)).color(INK_SOFT));
+                }
+            });
+        }
         if let Some((i, o)) = v.audio_active {
             ui.label(theme::margin_text(&format!("{i} → {o}")));
             let (l, r) = v.stats.audio_peaks;
@@ -649,7 +874,7 @@ fn meter(ui: &mut egui::Ui, ch: &str, level: f32) {
 }
 
 fn overlay_section(ui: &mut egui::Ui, v: &mut UiView) {
-    theme::section(ui, 6, "Overlay & capture", false, |ui| {
+    theme::section(ui, 7, "Overlay & capture", false, |ui| {
         let s = &mut *v.settings;
         row(ui, "", |ui| {
             theme::check(ui, &mut s.show_stats, "Show stats HUD (F2)");
@@ -875,6 +1100,80 @@ fn frame_graph(ui: &mut egui::Ui, st: &Stats) {
             0.0,
             if late { VERMILLION } else { PINE },
         );
+    }
+}
+
+/// Frame around the video rect (`r` = x, y, w, h in pixels), drawn on egui's
+/// background layer: above the video, below every panel.
+pub fn draw_frame(ctx: &egui::Context, r: [f32; 4], s: &Settings, tex: Option<&crate::assets::FrameTexture>) {
+    if s.frame_style == FrameStyle::None {
+        return;
+    }
+    let ppp = ctx.pixels_per_point();
+    let video = egui::Rect::from_min_size(egui::pos2(r[0] / ppp, r[1] / ppp), egui::vec2(r[2] / ppp, r[3] / ppp));
+    let t = s.frame_thickness / ppp;
+    let p = ctx.layer_painter(egui::LayerId::background());
+    let rgb = |c: [f32; 3]| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
+    // Hard shadow as two strips (right + bottom) so it never covers the video.
+    let shadow = |rect: egui::Rect, off: f32, col: Color32| {
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.max.x, rect.min.y + off), egui::pos2(rect.max.x + off, rect.max.y + off)),
+            0.0,
+            col,
+        );
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.min.x + off, rect.max.y), egui::pos2(rect.max.x, rect.max.y + off)),
+            0.0,
+            col,
+        );
+    };
+    match s.frame_style {
+        FrameStyle::None => {}
+        FrameStyle::Outline => {
+            p.rect_stroke(video, 0.0, egui::Stroke::new(t, rgb(s.frame_color)), egui::StrokeKind::Outside);
+        }
+        FrameStyle::HardShadow => shadow(video, 8.0 / ppp, rgb(s.frame_color)),
+        FrameStyle::PixelCard => {
+            let outer = video.expand(t);
+            shadow(outer, 6.0 / ppp, COBALT);
+            for band in [
+                egui::Rect::from_min_max(outer.min, egui::pos2(outer.max.x, video.min.y)),
+                egui::Rect::from_min_max(egui::pos2(outer.min.x, video.max.y), outer.max),
+                egui::Rect::from_min_max(egui::pos2(outer.min.x, video.min.y), egui::pos2(video.min.x, video.max.y)),
+                egui::Rect::from_min_max(egui::pos2(video.max.x, video.min.y), egui::pos2(outer.max.x, video.max.y)),
+            ] {
+                p.rect_filled(band, 0.0, BONE);
+            }
+            let ink = egui::Stroke::new((2.0 / ppp).max(1.0), INK);
+            p.rect_stroke(outer, 0.0, ink, egui::StrokeKind::Inside);
+            p.rect_stroke(video, 0.0, ink, egui::StrokeKind::Outside);
+        }
+        FrameStyle::Image => {
+            let Some(ft) = tex else { return };
+            // 9-slice: corners keep their pixels, edges stretch, centre is skipped.
+            let o = (s.frame_overlap / ppp).min(t);
+            let outer = video.expand(t - o);
+            let inner = video.shrink(o);
+            let (w, h) = (ft.size[0].max(1) as f32, ft.size[1].max(1) as f32);
+            let su = (s.frame_slice as f32 / w).min(0.5);
+            let sv = (s.frame_slice as f32 / h).min(0.5);
+            let xs = [outer.min.x, inner.min.x, inner.max.x, outer.max.x];
+            let ys = [outer.min.y, inner.min.y, inner.max.y, outer.max.y];
+            let us = [0.0, su, 1.0 - su, 1.0];
+            let vs = [0.0, sv, 1.0 - sv, 1.0];
+            let mut mesh = egui::Mesh::with_texture(ft.tex.id());
+            for j in 0..3 {
+                for i in 0..3 {
+                    if i == 1 && j == 1 {
+                        continue;
+                    }
+                    let rect = egui::Rect::from_min_max(egui::pos2(xs[i], ys[j]), egui::pos2(xs[i + 1], ys[j + 1]));
+                    let uv = egui::Rect::from_min_max(egui::pos2(us[i], vs[j]), egui::pos2(us[i + 1], vs[j + 1]));
+                    mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
+                }
+            }
+            p.add(egui::Shape::mesh(mesh));
+        }
     }
 }
 

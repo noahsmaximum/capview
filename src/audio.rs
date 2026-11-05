@@ -23,6 +23,8 @@ pub struct AudioShared {
     pub in_rate: AtomicU32,
     pub out_rate: AtomicU32,
     pub error: parking_lot::Mutex<Option<String>>,
+    /// DC blocker / noise gate controls + noise-floor readout.
+    pub dsp: crate::dsp::DspParams,
 }
 
 impl AudioShared {
@@ -38,6 +40,7 @@ impl AudioShared {
             in_rate: AtomicU32::new(0),
             out_rate: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
+            dsp: crate::dsp::DspParams::default(),
         }
     }
     pub fn set_volume(&self, v: f32) {
@@ -186,16 +189,16 @@ pub fn start(
 
     let input_stream = match in_cfg.sample_format() {
         cpal::SampleFormat::F32 => {
-            build_input::<f32>(&in_dev, in_cfg.config(), in_ch, prod, shared.clone())
+            build_input::<f32>(&in_dev, in_cfg.config(), in_ch, in_rate, prod, shared.clone())
         }
         cpal::SampleFormat::I16 => {
-            build_input::<i16>(&in_dev, in_cfg.config(), in_ch, prod, shared.clone())
+            build_input::<i16>(&in_dev, in_cfg.config(), in_ch, in_rate, prod, shared.clone())
         }
         cpal::SampleFormat::I32 => {
-            build_input::<i32>(&in_dev, in_cfg.config(), in_ch, prod, shared.clone())
+            build_input::<i32>(&in_dev, in_cfg.config(), in_ch, in_rate, prod, shared.clone())
         }
         cpal::SampleFormat::U16 => {
-            build_input::<u16>(&in_dev, in_cfg.config(), in_ch, prod, shared.clone())
+            build_input::<u16>(&in_dev, in_cfg.config(), in_ch, in_rate, prod, shared.clone())
         }
         f => Err(format!("unsupported input format {f:?}")),
     }?;
@@ -229,6 +232,7 @@ fn build_input<T>(
     dev: &cpal::Device,
     cfg: cpal::StreamConfig,
     ch: usize,
+    rate: u32,
     mut prod: Prod,
     shared: Arc<AudioShared>,
 ) -> Result<cpal::Stream, String>
@@ -237,6 +241,8 @@ where
     f32: FromSample<T>,
 {
     let sh = shared.clone();
+    let dsp_shared = shared.clone();
+    let mut dsp = crate::dsp::InputDsp::new(rate);
     let mut scratch: Vec<f32> = Vec::with_capacity(4096);
     dev.build_input_stream::<T, _, _>(
         cfg,
@@ -249,8 +255,10 @@ where
                 } else {
                     l
                 };
-                scratch.push(l);
-                scratch.push(r);
+                let mut f = [l, r];
+                dsp.process(&dsp_shared.dsp, &mut f);
+                scratch.push(f[0]);
+                scratch.push(f[1]);
             }
             prod.push_slice(&scratch);
         },

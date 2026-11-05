@@ -17,13 +17,56 @@ struct Params {
     dither_levels: f32,     // 0 = off, else 255 / 1023
     antiring: f32,
     frame: u32,
-    _p0: u32,
-    _p1: u32,
+    bg_mode: u32,           // 0 colour, 1 image
+    bg_fit: u32,            // 0 cover, 1 contain, 2 stretch, 3 center, 4 tile
+    tgt_size: vec2<f32>,    // swapchain size, pixels
+    bg_size: vec2<f32>,     // background image size, pixels
+    bg_dim: f32,
+    _q0: u32,
+    _q1: u32,
+    _q2: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var bg_tex: texture_2d<f32>;
+@group(1) @binding(1) var bg_samp: sampler;
+
+// Letterbox fill: solid colour, or the background image mapped per fit mode.
+// LOD is picked from the on-screen scale so large photos minify cleanly.
+fn background(p: vec2<f32>) -> vec3<f32> {
+    let col = P.background.rgb;
+    if (P.bg_mode != 1u) {
+        return col;
+    }
+    let t = P.tgt_size;
+    let isz = max(P.bg_size, vec2<f32>(1.0));
+    var uv = vec2<f32>(0.0);
+    var px_per_texel = 1.0;
+    if (P.bg_fit == 0u) {
+        let k = max(t.x / isz.x, t.y / isz.y);
+        uv = ((p - t * 0.5) / k + isz * 0.5) / isz;
+        px_per_texel = k;
+    } else if (P.bg_fit == 1u) {
+        let k = min(t.x / isz.x, t.y / isz.y);
+        uv = ((p - t * 0.5) / k + isz * 0.5) / isz;
+        px_per_texel = k;
+    } else if (P.bg_fit == 2u) {
+        uv = p / t;
+        px_per_texel = min(t.x / isz.x, t.y / isz.y);
+    } else if (P.bg_fit == 3u) {
+        uv = ((p - t * 0.5) + isz * 0.5) / isz;
+    } else {
+        uv = fract(p / isz);
+    }
+    var c = col;
+    if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
+        let lod = max(0.0, log2(1.0 / max(px_per_texel, 1e-4)));
+        c = textureSampleLevel(bg_tex, bg_samp, uv, lod).rgb;
+    }
+    return c * (1.0 - P.bg_dim);
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -150,7 +193,7 @@ fn hash(p: vec3<u32>) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv0 = (in.pos.xy - P.dst_origin) / P.dst_size;
     if (any(uv0 < vec2<f32>(0.0)) || any(uv0 >= vec2<f32>(1.0))) {
-        return vec4<f32>(P.background.rgb, 1.0);
+        return vec4<f32>(background(in.pos.xy), 1.0);
     }
     // dest uv -> source uv: undo rotation (clockwise), then flips.
     var uv = uv0;

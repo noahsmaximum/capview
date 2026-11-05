@@ -133,6 +133,45 @@ pub enum Rotation {
     R270,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackgroundMode {
+    Color,
+    Image,
+}
+
+/// How a background image covers the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageFit {
+    /// Fill the window, cropping overflow.
+    Cover,
+    /// Whole image visible, colour around it.
+    Contain,
+    Stretch,
+    /// 1:1 pixels, centred.
+    Center,
+    Tile,
+}
+
+impl ImageFit {
+    pub fn id(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Decoration drawn around the video rectangle; adapts to every size mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameStyle {
+    None,
+    /// Solid outline in `frame_color`.
+    Outline,
+    /// OVERWORLD card: bone band, ink rules, hard cobalt shadow.
+    PixelCard,
+    /// Hard offset shadow only.
+    HardShadow,
+    /// User PNG, 9-slice scaled around the video.
+    Image,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -171,6 +210,24 @@ pub struct Settings {
     pub rotation: Rotation,
     pub background: [f32; 3],
 
+    // --- background & frame ---
+    pub background_mode: BackgroundMode,
+    pub background_image: Option<String>,
+    pub background_fit: ImageFit,
+    /// 0 = image as-is, 1 = black.
+    pub background_dim: f32,
+    pub frame_style: FrameStyle,
+    pub frame_image: Option<String>,
+    /// Corner size of the 9-slice frame image, in image pixels.
+    pub frame_slice: u32,
+    /// Frame band thickness on screen, in pixels.
+    pub frame_thickness: f32,
+    /// How far an image frame overlaps the video edge (hides rounded inner corners).
+    pub frame_overlap: f32,
+    pub frame_color: [f32; 3],
+    /// Extra margin between the window edge and the framed video, in pixels.
+    pub video_inset: f32,
+
     // --- display ---
     pub present_mode: PresentMode,
     pub frame_latency: u32,
@@ -190,6 +247,14 @@ pub struct Settings {
     pub audio_buffer_ms: f32,
     /// Re-interpret MS2109 "96 kHz mono" audio as 48 kHz stereo.
     pub audio_ms2109_fix: bool,
+    /// Remove the DC offset some cards' analog audio stage adds.
+    pub audio_dc_block: bool,
+    /// Fade the card's hiss to silence when nothing is playing.
+    pub audio_gate: bool,
+    pub audio_gate_db: f32,
+    /// Spectral hiss reduction under sound (+~11 ms audio latency).
+    pub audio_nr: bool,
+    pub audio_nr_strength: f32,
 
     // --- overlay ---
     pub show_stats: bool,
@@ -228,6 +293,17 @@ impl Default for Settings {
             flip_v: false,
             rotation: Rotation::R0,
             background: [0.0, 0.0, 0.0],
+            background_mode: BackgroundMode::Color,
+            background_image: None,
+            background_fit: ImageFit::Cover,
+            background_dim: 0.0,
+            frame_style: FrameStyle::None,
+            frame_image: None,
+            frame_slice: 32,
+            frame_thickness: 24.0,
+            frame_overlap: 0.0,
+            frame_color: [0.086, 0.075, 0.063],
+            video_inset: 0.0,
             present_mode: PresentMode::Immediate,
             frame_latency: 1,
             output_depth: OutputDepth::Bits10,
@@ -243,6 +319,11 @@ impl Default for Settings {
             muted: false,
             audio_buffer_ms: 30.0,
             audio_ms2109_fix: true,
+            audio_dc_block: true,
+            audio_gate: true,
+            audio_gate_db: -50.0,
+            audio_nr: true,
+            audio_nr_strength: 0.6,
             show_stats: false,
             stats_corner: 0,
             ui_scale: 1.0,
@@ -252,6 +333,10 @@ impl Default for Settings {
 }
 
 pub fn config_dir() -> PathBuf {
+    // Test hook: isolate settings/presets/images (CAPVIEW_CONFIG_DIR=<folder>).
+    if let Some(d) = std::env::var_os("CAPVIEW_CONFIG_DIR") {
+        return PathBuf::from(d);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("capview")
@@ -283,6 +368,51 @@ impl Settings {
         }
     }
 
+    /// Room the frame needs outside the video rect (pixels), so it's never clipped.
+    pub fn frame_space(&self) -> f32 {
+        match self.frame_style {
+            FrameStyle::None => 0.0,
+            FrameStyle::Outline => self.frame_thickness,
+            FrameStyle::PixelCard => self.frame_thickness + 6.0,
+            FrameStyle::HardShadow => 8.0,
+            FrameStyle::Image => (self.frame_thickness - self.frame_overlap).max(0.0),
+        }
+    }
+
+    /// Copy a preset's look onto these settings, keeping machine-specific fields
+    /// (capture/audio devices, window size, screenshot folder, UI scale).
+    pub fn apply_preset(&mut self, preset: &Settings) {
+        let keep = self.clone();
+        *self = preset.clone();
+        self.device_link = keep.device_link;
+        self.device_name = keep.device_name;
+        self.audio_input = keep.audio_input;
+        self.audio_output = keep.audio_output;
+        self.window_size = keep.window_size;
+        self.screenshot_dir = keep.screenshot_dir;
+        self.ui_scale = keep.ui_scale;
+        self.start_fullscreen = keep.start_fullscreen;
+    }
+
+    /// The parts of these settings a preset stores (machine-specific fields cleared).
+    pub fn as_preset(&self) -> Settings {
+        let mut p = self.clone();
+        p.device_link = None;
+        p.device_name = None;
+        p.audio_input = None;
+        p.audio_output = None;
+        p.window_size = None;
+        p.screenshot_dir = None;
+        p
+    }
+
+    /// True if applying `preset` would change nothing.
+    pub fn matches_preset(&self, preset: &Settings) -> bool {
+        let mut probe = self.clone();
+        probe.apply_preset(preset);
+        probe == *self
+    }
+
     pub fn screenshot_dir(&self) -> PathBuf {
         if let Some(d) = &self.screenshot_dir {
             return PathBuf::from(d);
@@ -290,5 +420,124 @@ impl Settings {
         dirs::picture_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("capview")
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Presets: %APPDATA%\capview\presets\<name>.json
+
+pub fn presets_dir() -> PathBuf {
+    config_dir().join("presets")
+}
+
+/// Assets (background/frame images) copied in so presets stay valid if originals move.
+pub fn images_dir() -> PathBuf {
+    config_dir().join("images")
+}
+
+fn preset_file(name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' })
+        .collect();
+    presets_dir().join(format!("{}.json", safe.trim()))
+}
+
+#[derive(Serialize, Deserialize)]
+struct PresetFile {
+    name: String,
+    settings: Settings,
+}
+
+/// Preset names, sorted case-insensitively (Ctrl+1..9 follow this order).
+pub fn list_presets() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(presets_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| serde_json::from_str::<PresetFile>(&s).ok())
+        .map(|p| p.name)
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+pub fn load_preset(name: &str) -> Option<Settings> {
+    let s = std::fs::read_to_string(preset_file(name)).ok()?;
+    serde_json::from_str::<PresetFile>(&s).ok().map(|p| p.settings)
+}
+
+pub fn save_preset(name: &str, settings: &Settings) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Preset needs a name".into());
+    }
+    std::fs::create_dir_all(presets_dir()).map_err(|e| e.to_string())?;
+    let file = PresetFile { name: name.to_owned(), settings: settings.as_preset() };
+    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    std::fs::write(preset_file(name), json).map_err(|e| e.to_string())
+}
+
+pub fn delete_preset(name: &str) -> Result<(), String> {
+    std::fs::remove_file(preset_file(name)).map_err(|e| e.to_string())
+}
+
+/// Copy a picked image into the app's images folder; returns the stored path.
+pub fn import_image(src: &std::path::Path) -> Result<String, String> {
+    let dir = images_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = src.file_name().ok_or("bad file name")?;
+    let dst = dir.join(name);
+    if dst != src {
+        std::fs::copy(src, &dst).map_err(|e| e.to_string())?;
+    }
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_roundtrip_keeps_machine_fields() {
+        let dir = std::env::temp_dir().join(format!("capview_preset_test_{}", std::process::id()));
+        // SAFETY: only this test touches CAPVIEW_CONFIG_DIR.
+        unsafe { std::env::set_var("CAPVIEW_CONFIG_DIR", &dir) };
+
+        let mut mine = Settings::default();
+        mine.device_name = Some("USB3 Video".into());
+        mine.audio_output = Some("MOTU".into());
+        mine.window_size = Some([1600, 900]);
+
+        let mut look = Settings::default();
+        look.scale_filter = ScaleFilter::Nearest;
+        look.aspect_mode = AspectMode::Integer;
+        look.frame_style = FrameStyle::PixelCard;
+        look.saturation = 1.2;
+        look.device_name = Some("Other Card".into());
+        save_preset("Retro / integer", &look).unwrap();
+
+        assert_eq!(list_presets(), vec!["Retro / integer".to_string()]);
+        let loaded = load_preset("Retro / integer").unwrap();
+        assert_eq!(loaded.device_name, None, "presets never store devices");
+
+        mine.apply_preset(&loaded);
+        assert_eq!(mine.scale_filter, ScaleFilter::Nearest);
+        assert_eq!(mine.aspect_mode, AspectMode::Integer);
+        assert_eq!(mine.frame_style, FrameStyle::PixelCard);
+        assert_eq!(mine.saturation, 1.2);
+        assert_eq!(mine.device_name.as_deref(), Some("USB3 Video"), "device kept");
+        assert_eq!(mine.audio_output.as_deref(), Some("MOTU"), "audio device kept");
+        assert_eq!(mine.window_size, Some([1600, 900]), "window size kept");
+        assert!(mine.matches_preset(&loaded));
+        mine.saturation = 1.0;
+        assert!(!mine.matches_preset(&loaded), "edits mark the preset modified");
+
+        delete_preset("Retro / integer").unwrap();
+        assert!(list_presets().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

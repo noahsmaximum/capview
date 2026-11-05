@@ -49,7 +49,12 @@ struct ScaleParams {
     dither_levels: f32,
     antiring: f32,
     frame: u32,
-    _pad: [u32; 2],
+    bg_mode: u32,
+    bg_fit: u32,
+    target: [f32; 2],
+    bg_size: [f32; 2],
+    bg_dim: f32,
+    _pad2: [u32; 3],
 }
 
 /// Resolved colour interpretation for display in the UI.
@@ -94,6 +99,14 @@ pub struct VideoRenderer {
     scale_bgl: wgpu::BindGroupLayout,
     scale_ubo: wgpu::Buffer,
     sampler: wgpu::Sampler,
+    /// Group 1: background image + trilinear sampler (1x1 dummy when unused).
+    bg_bgl: wgpu::BindGroupLayout,
+    bg_sampler: wgpu::Sampler,
+    bg_group: wgpu::BindGroup,
+    bg_size: [f32; 2],
+    bg_loaded: bool,
+    /// Bound when no source is open, so the background still draws.
+    dummy_scale_group: wgpu::BindGroup,
 
     src: Option<SourceBinding>,
     frame_counter: u32,
@@ -266,7 +279,19 @@ impl VideoRenderer {
                 },
             ],
         });
-        let scale_layout = layout(&[&scale_bgl]);
+        let bg_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bg_bgl"),
+            entries: &[
+                tex_entry(0, float),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let scale_layout = layout(&[&scale_bgl, &bg_bgl]);
         let scale_pipeline = fullscreen_pipeline(
             device,
             "scale",
@@ -285,7 +310,61 @@ impl VideoRenderer {
             ..Default::default()
         });
 
+        let bg_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bg_trilinear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let dummy = |format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dummy"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let scale_ubo = ubo(device, "scale_ubo", std::mem::size_of::<ScaleParams>());
+        let bg_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg_group_dummy"),
+            layout: &bg_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy(wgpu::TextureFormat::Rgba8Unorm)),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bg_sampler) },
+            ],
+        });
+        let dummy_scale_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scale_dummy"),
+            layout: &scale_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: scale_ubo.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&dummy(INTERMEDIATE)),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+
         Self {
+            bg_bgl,
+            bg_sampler,
+            bg_group,
+            bg_size: [1.0, 1.0],
+            bg_loaded: false,
+            dummy_scale_group,
             convert_packed,
             convert_planar,
             convert_rgb,
@@ -302,7 +381,7 @@ impl VideoRenderer {
             scale_pipeline,
             scale_target: target,
             scale_bgl,
-            scale_ubo: ubo(device, "scale_ubo", std::mem::size_of::<ScaleParams>()),
+            scale_ubo,
             sampler,
             src: None,
             frame_counter: 0,
@@ -535,8 +614,17 @@ impl VideoRenderer {
         ten_bit: bool,
     ) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        let Some(src) = &self.src else { return };
-        let geo = compute_geometry(src.width, src.height, target_size, s);
+        let geo = match &self.src {
+            Some(src) => compute_geometry(src.width, src.height, target_size, s),
+            // No source: park the video rect off-screen so only the background draws.
+            None => Geometry {
+                dst_origin: [-10.0, -10.0],
+                dst_size: [1.0, 1.0],
+                crop_origin: [0.0, 0.0],
+                crop_size: [1.0, 1.0],
+                scale: [1.0, 1.0],
+            },
+        };
         self.dest_rect = [
             geo.dst_origin[0],
             geo.dst_origin[1],
@@ -567,17 +655,85 @@ impl VideoRenderer {
                 _ => 0.0,
             },
             frame: self.frame_counter,
-            _pad: [0; 2],
+            bg_mode: (s.background_mode == BackgroundMode::Image && self.bg_loaded) as u32,
+            bg_fit: s.background_fit.id(),
+            target: [target_size[0] as f32, target_size[1] as f32],
+            bg_size: self.bg_size,
+            bg_dim: s.background_dim.clamp(0.0, 1.0),
+            _pad2: [0; 3],
         };
         queue.write_buffer(&self.scale_ubo, 0, bytemuck::bytes_of(&params));
         pass.set_pipeline(&self.scale_pipeline);
-        let bg = if s.sharpen > 0.001 {
-            &src.scale_bg_sharp
-        } else {
-            &src.scale_bg_rgb
+        let group = match &self.src {
+            Some(src) if s.sharpen > 0.001 => &src.scale_bg_sharp,
+            Some(src) => &src.scale_bg_rgb,
+            None => &self.dummy_scale_group,
         };
-        pass.set_bind_group(0, bg, &[]);
+        pass.set_bind_group(0, group, &[]);
+        pass.set_bind_group(1, &self.bg_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Upload a decoded background image with a full mip chain (trilinear sampling
+    /// keeps large photos from shimmering when shrunk to the window).
+    pub fn set_background_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: Option<&image::RgbaImage>,
+    ) {
+        let Some(img) = img else {
+            self.bg_loaded = false;
+            return;
+        };
+        let (w, h) = img.dimensions();
+        let levels = 32 - w.max(h).max(1).leading_zeros();
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("background"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Stored sRGB-encoded and sampled raw: values go straight to the
+            // (non-sRGB) swapchain, like the video.
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut level_img = img.clone();
+        for level in 0..levels {
+            let (lw, lh) = level_img.dimensions();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &level_img,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh) },
+                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+            );
+            if level + 1 < levels {
+                level_img = image::imageops::resize(
+                    &level_img,
+                    (lw / 2).max(1),
+                    (lh / 2).max(1),
+                    image::imageops::FilterType::Triangle,
+                );
+            }
+        }
+        let view = tex.create_view(&Default::default());
+        self.bg_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg_group"),
+            layout: &self.bg_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.bg_sampler) },
+            ],
+        });
+        self.bg_size = [w as f32, h as f32];
+        self.bg_loaded = true;
     }
 
     /// Copy the processed source-resolution image into a mappable buffer.
@@ -882,7 +1038,13 @@ pub struct Geometry {
 }
 
 pub fn compute_geometry(sw: u32, sh: u32, target: [u32; 2], s: &Settings) -> Geometry {
-    let (tw, th) = (target[0].max(1) as f32, target[1].max(1) as f32);
+    // Leave room for the frame (and any user inset) so decorations are never clipped.
+    let (full_w, full_h) = (target[0].max(1) as f32, target[1].max(1) as f32);
+    let margin = (s.video_inset.max(0.0) + s.frame_space())
+        .round()
+        .min(full_w * 0.45)
+        .min(full_h * 0.45);
+    let (tw, th) = ((full_w - 2.0 * margin).max(16.0), (full_h - 2.0 * margin).max(16.0));
     let cl = s.crop_l.min(sw.saturating_sub(1));
     let ct = s.crop_t.min(sh.saturating_sub(1));
     let cw = sw.saturating_sub(cl + s.crop_r).max(1) as f32;
@@ -922,8 +1084,8 @@ pub fn compute_geometry(sw: u32, sh: u32, target: [u32; 2], s: &Settings) -> Geo
     };
     w *= s.zoom;
     h *= s.zoom;
-    let mut x = (tw - w) * 0.5;
-    let mut y = (th - h) * 0.5;
+    let mut x = margin + (tw - w) * 0.5;
+    let mut y = margin + (th - h) * 0.5;
     if matches!(s.aspect_mode, AspectMode::Integer | AspectMode::Native)
         || s.scale_filter == ScaleFilter::Nearest
     {

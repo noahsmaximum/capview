@@ -1,8 +1,10 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! capview — low-latency, high-quality USB capture card viewer.
 
+mod assets;
 mod audio;
 mod capture;
+mod dsp;
 mod render;
 mod settings;
 mod theme;
@@ -90,6 +92,13 @@ struct App {
     last_render: Instant,
     /// CAPVIEW_SMOKE=<secs>: log stats, screenshot at 3 s, exit after N s.
     smoke: Option<(Instant, f32, bool, Instant)>,
+    /// Settings as of the previous frame: auto-save waits for 1 s without changes.
+    last_seen: Settings,
+    assets: assets::Assets,
+    presets: Vec<String>,
+    /// Last preset loaded or saved (shown in the panel, marked if modified).
+    active_preset: Option<String>,
+    preset_name: String,
 }
 
 impl App {
@@ -100,6 +109,8 @@ impl App {
             // CAPVIEW_SMOKE_UI=panel shows only the settings card (README screenshots).
             settings.show_stats = std::env::var("CAPVIEW_SMOKE_UI").as_deref() != Ok("panel");
         }
+        let proxy_for_assets = proxy.clone();
+        let last_seen = settings.clone();
         Self {
             proxy,
             wake_pending: Arc::new(AtomicBool::new(false)),
@@ -138,6 +149,16 @@ impl App {
             next_ui_repaint: None,
             last_idle_redraw: Instant::now(),
             last_render: Instant::now(),
+            last_seen,
+            assets: assets::Assets::new({
+                let p = proxy_for_assets;
+                Arc::new(move || {
+                    let _ = p.send_event(UserEvent::Wake);
+                })
+            }),
+            presets: settings::list_presets(),
+            active_preset: None,
+            preset_name: String::new(),
             smoke: std::env::var("CAPVIEW_SMOKE")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
@@ -221,6 +242,7 @@ impl App {
     }
 
     fn reset_egui(&mut self) {
+        self.assets.invalidate_egui();
         let Some(window) = &self.window else { return };
         self.egui_ctx = egui::Context::default();
         self.applied_ui_scale = 0.0;
@@ -378,6 +400,11 @@ impl App {
             a.shared.set_volume(self.settings.volume);
             a.shared.set_muted(self.settings.muted);
             a.shared.set_target_ms(self.settings.audio_buffer_ms);
+            a.shared.dsp.dc_block.store(self.settings.audio_dc_block, Ordering::Relaxed);
+            a.shared.dsp.gate.store(self.settings.audio_gate, Ordering::Relaxed);
+            a.shared.dsp.set_gate_db(self.settings.audio_gate_db);
+            a.shared.dsp.nr.store(self.settings.audio_nr, Ordering::Relaxed);
+            a.shared.dsp.set_nr_strength(self.settings.audio_nr_strength);
             if let Some(e) = a.shared.error.lock().take() {
                 self.audio_error = Some(e);
             }
@@ -411,6 +438,28 @@ impl App {
             } else {
                 w.set_fullscreen(Some(Fullscreen::Borderless(None)));
             }
+        }
+    }
+
+    fn save_preset(&mut self, name: &str) {
+        match settings::save_preset(name, &self.settings) {
+            Ok(()) => {
+                self.active_preset = Some(name.trim().to_owned());
+                self.presets = settings::list_presets();
+                self.toast(format!("Saved preset {}", name.trim()));
+            }
+            Err(e) => self.toast(format!("Couldn't save preset: {e}")),
+        }
+    }
+
+    fn load_preset(&mut self, name: &str) {
+        match settings::load_preset(name) {
+            Some(p) => {
+                self.settings.apply_preset(&p);
+                self.active_preset = Some(name.to_owned());
+                self.toast(format!("Preset: {name}"));
+            }
+            None => self.toast(format!("Preset {name} not found")),
         }
     }
 
@@ -537,6 +586,13 @@ impl App {
                 };
                 self.toast(format!("{:?}", self.settings.aspect_mode));
             }
+            (_, Some(code)) if ctrl && digit(code).is_some() => {
+                let i = digit(code).unwrap();
+                match self.presets.get(i).cloned() {
+                    Some(name) => self.load_preset(&name),
+                    None => self.toast(format!("No preset in slot {}", i + 1)),
+                }
+            }
             (_, Some(KeyCode::KeyR)) if !ctrl => {
                 let d = Settings::default();
                 let s = &mut self.settings;
@@ -592,6 +648,15 @@ impl App {
             None => g.video.clear_source(),
         }
 
+        for msg in self.assets.update(&mut self.settings, &mut g.video, &g.device, &g.queue, &self.egui_ctx) {
+            self.toast = Some((msg, Instant::now()));
+        }
+        // Video rect for this frame (pixels), so the frame overlay never lags a resize.
+        let video_rect = textures.as_ref().map(|t| {
+            let geo = render::compute_geometry(t.width, t.height, [g.config.width, g.config.height], &self.settings);
+            [geo.dst_origin[0], geo.dst_origin[1], geo.dst_size[0], geo.dst_size[1]]
+        });
+
         // ---- egui ----
         let mut actions = Vec::new();
         let output_format = Some(format!("{:?}", g.config.format));
@@ -625,15 +690,30 @@ impl App {
                 audio_outputs: &self.audio_outputs,
                 audio_active,
                 audio_error: self.audio_error.clone(),
+                audio_floor_db: self.audio.as_ref().and_then(|a| a.shared.dsp.floor_db()),
+                audio_gate_open: self.audio.as_ref().map(|a| a.shared.dsp.gate_open.load(Ordering::Relaxed)),
+                audio_nr_ready: self.audio.as_ref().map(|a| a.shared.dsp.nr_ready.load(Ordering::Relaxed)),
                 adapter: &g.adapter_name,
                 present_modes: &g.present_modes,
                 ten_bit_available: g.ten_bit_ok,
                 fullscreen,
                 stats: &self.stats,
+                presets: &self.presets,
+                active_preset: self.active_preset.as_deref(),
+                preset_modified: false,
+                preset_name: &mut self.preset_name,
+                frame_loaded: self.assets.frame.is_some(),
                 actions: &mut actions,
             };
+            if let Some(name) = &self.active_preset {
+                view.preset_modified = settings::load_preset(name).is_none_or(|p| !view.settings.matches_preset(&p));
+            }
+            let frame_tex = self.assets.frame.as_ref();
             self.egui_ctx.run_ui(raw_input, |ui| {
                 let ctx = ui.ctx().clone();
+                if let Some(r) = video_rect {
+                    ui::draw_frame(&ctx, r, view.settings, frame_tex);
+                }
                 if show_ui {
                     ui::settings_panel(ui, &mut view);
                 }
@@ -755,11 +835,9 @@ impl App {
                     multiview_mask: None,
                 })
                 .forget_lifetime();
-            if textures.is_some() {
-                let ten_bit = g.config.format == wgpu::TextureFormat::Rgb10a2Unorm;
-                g.video
-                    .draw_scale(&g.queue, &mut pass, size, &self.settings, ten_bit);
-            }
+            let ten_bit = g.config.format == wgpu::TextureFormat::Rgb10a2Unorm;
+            g.video
+                .draw_scale(&g.queue, &mut pass, size, &self.settings, ten_bit);
             g.egui_renderer.render(&mut pass, &paint_jobs, &screen);
         }
         g.queue.submit(
@@ -827,10 +905,32 @@ impl App {
                     let _ = std::process::Command::new("explorer").arg(dir).spawn();
                 }
                 ui::UiAction::Close => self.show_ui = false,
+                ui::UiAction::PickBackground => self.assets.pick(assets::Kind::Background),
+                ui::UiAction::PickFrame => self.assets.pick(assets::Kind::Frame),
+                ui::UiAction::SavePreset(name) => self.save_preset(&name),
+                ui::UiAction::LoadPreset(name) => self.load_preset(&name),
+                ui::UiAction::DeletePreset(name) => {
+                    match settings::delete_preset(&name) {
+                        Ok(()) => self.toast(format!("Deleted preset {name}")),
+                        Err(e) => self.toast(format!("Couldn't delete: {e}")),
+                    }
+                    if self.active_preset.as_deref() == Some(name.as_str()) {
+                        self.active_preset = None;
+                    }
+                    self.presets = settings::list_presets();
+                }
+                ui::UiAction::OpenPresetsFolder => {
+                    let dir = settings::presets_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                }
             }
         }
-        if self.settings != self.saved {
+        // Auto-save 1 s after the *last* change (previously reset every frame, so it
+        // never fired while video was playing).
+        if self.settings != self.last_seen {
             self.last_change = Instant::now();
+            self.last_seen = self.settings.clone();
         }
         let _ = event_loop;
         if repaint_delay.is_zero() || self.screenshot_requested {
@@ -867,6 +967,22 @@ impl App {
         }
         next
     }
+}
+
+/// Ctrl+1..9 → preset slot 0..8.
+fn digit(code: KeyCode) -> Option<usize> {
+    Some(match code {
+        KeyCode::Digit1 => 0,
+        KeyCode::Digit2 => 1,
+        KeyCode::Digit3 => 2,
+        KeyCode::Digit4 => 3,
+        KeyCode::Digit5 => 4,
+        KeyCode::Digit6 => 5,
+        KeyCode::Digit7 => 6,
+        KeyCode::Digit8 => 7,
+        KeyCode::Digit9 => 8,
+        _ => return None,
+    })
 }
 
 fn auto_pick(devices: &[DeviceInfo]) -> Option<DeviceInfo> {
