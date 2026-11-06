@@ -1,14 +1,15 @@
 # capview
 
-A clean, low-latency viewer for USB HDMI capture cards on Windows: uncompressed capture
-straight into the GPU, high-quality scaling, and a pixel-editorial UI.
+A clean, low-latency viewer for USB HDMI capture cards on Windows and macOS: uncompressed
+capture straight into the GPU, high-quality scaling, and a pixel-editorial UI.
 
 ![capview settings panel](docs/screenshot.png)
 
 ## Highlights
 
 - **Low latency:** ~1–2 ms from frame arrival to present on a 1080p60 card.
-  - Media Foundation async reader in `MF_LOW_LATENCY` mode.
+  - Windows: Media Foundation async reader in `MF_LOW_LATENCY` mode.
+  - macOS: AVFoundation with late frames discarded rather than queued.
   - Frames are uploaded to the GPU from the capture thread, with no CPU hand-off queue.
   - DirectX 12 flip-model swapchain, 1 frame in flight, optional tearing (Immediate).
   - The window redraws only when a new frame arrives.
@@ -37,16 +38,24 @@ straight into the GPU, high-quality scaling, and a pixel-editorial UI.
 
 ## Install
 
-Requires Windows 10/11 and a DirectX 12 GPU.
+Download the zip for your OS from [Releases](https://github.com/noahsmaximum/capview/releases).
+It picks your capture card automatically. Webcams and virtual cameras are skipped.
+
+- **Windows 10/11** with a DirectX 12 GPU: unzip and run `capview.exe`.
+- **macOS 11+** (Apple Silicon or Intel), *experimental*: unzip and drag `capview.app` to
+  Applications. The app isn't notarized, so the first time, right-click it → **Open** → **Open**.
+  Allow camera and microphone access when asked; that's how macOS lets apps read capture cards.
+
+### Build from source
 
 ```bash
 git clone https://github.com/noahsmaximum/capview
 cd capview
 cargo build --release
-target/release/capview.exe
 ```
 
-It picks your capture card automatically. Webcams and virtual cameras are skipped.
+On a Mac, `packaging/macos/bundle.sh` builds a universal `capview.app` into `dist/`.
+Linux builds and runs, but has no capture backend yet.
 
 ## Controls
 

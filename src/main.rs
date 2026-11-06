@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! capview — low-latency, high-quality USB capture card viewer.
 
 mod assets;
@@ -171,7 +171,7 @@ impl App {
 
     fn init_gfx(&mut self, window: Arc<Window>) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12),
+            backends: wgpu::Backends::from_env().unwrap_or(native_backend()),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance
@@ -403,11 +403,22 @@ impl App {
             a.shared.set_volume(self.settings.volume);
             a.shared.set_muted(self.settings.muted);
             a.shared.set_target_ms(self.settings.audio_buffer_ms);
-            a.shared.dsp.dc_block.store(self.settings.audio_dc_block, Ordering::Relaxed);
-            a.shared.dsp.gate.store(self.settings.audio_gate, Ordering::Relaxed);
+            a.shared
+                .dsp
+                .dc_block
+                .store(self.settings.audio_dc_block, Ordering::Relaxed);
+            a.shared
+                .dsp
+                .gate
+                .store(self.settings.audio_gate, Ordering::Relaxed);
             a.shared.dsp.set_gate_db(self.settings.audio_gate_db);
-            a.shared.dsp.nr.store(self.settings.audio_nr, Ordering::Relaxed);
-            a.shared.dsp.set_nr_strength(self.settings.audio_nr_strength);
+            a.shared
+                .dsp
+                .nr
+                .store(self.settings.audio_nr, Ordering::Relaxed);
+            a.shared
+                .dsp
+                .set_nr_strength(self.settings.audio_nr_strength);
             if let Some(e) = a.shared.error.lock().take() {
                 self.audio_error = Some(e);
             }
@@ -456,7 +467,9 @@ impl App {
     }
 
     fn update_preset(&mut self) {
-        let Some((entry, _)) = self.active_preset.clone() else { return };
+        let Some((entry, _)) = self.active_preset.clone() else {
+            return;
+        };
         match settings::update_preset(&entry, &self.settings) {
             Ok(()) => {
                 self.toast(format!("Updated preset {}", entry.name));
@@ -688,13 +701,29 @@ impl App {
             None => g.video.clear_source(),
         }
 
-        for msg in self.assets.update(&mut self.settings, &mut g.video, &g.device, &g.queue, &self.egui_ctx) {
+        for msg in self.assets.update(
+            &mut self.settings,
+            &mut g.video,
+            &g.device,
+            &g.queue,
+            &self.egui_ctx,
+        ) {
             self.toast = Some((msg, Instant::now()));
         }
         // Video rect for this frame (pixels), so the frame overlay never lags a resize.
         let video_rect = textures.as_ref().map(|t| {
-            let geo = render::compute_geometry(t.width, t.height, [g.config.width, g.config.height], &self.settings);
-            [geo.dst_origin[0], geo.dst_origin[1], geo.dst_size[0], geo.dst_size[1]]
+            let geo = render::compute_geometry(
+                t.width,
+                t.height,
+                [g.config.width, g.config.height],
+                &self.settings,
+            );
+            [
+                geo.dst_origin[0],
+                geo.dst_origin[1],
+                geo.dst_size[0],
+                geo.dst_size[1],
+            ]
         });
 
         // ---- egui ----
@@ -731,8 +760,14 @@ impl App {
                 audio_active,
                 audio_error: self.audio_error.clone(),
                 audio_floor_db: self.audio.as_ref().and_then(|a| a.shared.dsp.floor_db()),
-                audio_gate_open: self.audio.as_ref().map(|a| a.shared.dsp.gate_open.load(Ordering::Relaxed)),
-                audio_nr_ready: self.audio.as_ref().map(|a| a.shared.dsp.nr_ready.load(Ordering::Relaxed)),
+                audio_gate_open: self
+                    .audio
+                    .as_ref()
+                    .map(|a| a.shared.dsp.gate_open.load(Ordering::Relaxed)),
+                audio_nr_ready: self
+                    .audio
+                    .as_ref()
+                    .map(|a| a.shared.dsp.nr_ready.load(Ordering::Relaxed)),
                 adapter: &g.adapter_name,
                 present_modes: &g.present_modes,
                 ten_bit_available: g.ten_bit_ok,
@@ -942,7 +977,7 @@ impl App {
                 ui::UiAction::OpenScreenshotFolder => {
                     let dir = self.settings.screenshot_dir();
                     let _ = std::fs::create_dir_all(&dir);
-                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    open_folder(&dir);
                 }
                 ui::UiAction::Close => self.show_ui = false,
                 ui::UiAction::PickBackground => self.assets.pick(assets::Kind::Background),
@@ -955,7 +990,11 @@ impl App {
                         Ok(()) => self.toast("Deleted preset"),
                         Err(e) => self.toast(format!("Couldn't delete: {e}")),
                     }
-                    if self.active_preset.as_ref().is_some_and(|(e, _)| e.path == path) {
+                    if self
+                        .active_preset
+                        .as_ref()
+                        .is_some_and(|(e, _)| e.path == path)
+                    {
                         self.active_preset = None;
                     }
                     self.refresh_presets();
@@ -963,7 +1002,7 @@ impl App {
                 ui::UiAction::OpenPresetsFolder => {
                     let dir = settings::presets_dir();
                     let _ = std::fs::create_dir_all(&dir);
-                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    open_folder(&dir);
                 }
             }
         }
@@ -1062,12 +1101,63 @@ fn auto_pick(devices: &[DeviceInfo]) -> Option<DeviceInfo> {
     devices.iter().max_by_key(|d| score(&d.name)).cloned()
 }
 
+/// The GPU API each OS is best at; override with WGPU_BACKEND.
+fn native_backend() -> wgpu::Backends {
+    if cfg!(target_os = "windows") {
+        wgpu::Backends::DX12
+    } else if cfg!(target_os = "macos") {
+        wgpu::Backends::METAL
+    } else {
+        wgpu::Backends::VULKAN
+    }
+}
+
+/// Show a folder in the system file manager.
+fn open_folder(dir: &std::path::Path) {
+    let cmd = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(cmd).arg(dir).spawn() {
+        log::warn!("couldn't open {}: {e}", dir.display());
+    }
+}
+
+/// Local time as `YYYYMMDD_HHMMSS_mmm` for screenshot names.
+#[cfg(windows)]
 fn timestamp() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}_{:03}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
+}
+
+#[cfg(unix)]
+fn timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as libc::time_t;
+    // SAFETY: localtime_r only writes the tm we hand it.
+    let t = unsafe {
+        let mut t: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&secs, &mut t);
+        t
+    };
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}_{:03}",
+        t.tm_year + 1900,
+        t.tm_mon + 1,
+        t.tm_mday,
+        t.tm_hour,
+        t.tm_min,
+        t.tm_sec,
+        now.subsec_millis()
     )
 }
 

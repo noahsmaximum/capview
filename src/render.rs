@@ -323,7 +323,11 @@ impl VideoRenderer {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some("dummy"),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -340,21 +344,32 @@ impl VideoRenderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&dummy(wgpu::TextureFormat::Rgba8Unorm)),
+                    resource: wgpu::BindingResource::TextureView(&dummy(
+                        wgpu::TextureFormat::Rgba8Unorm,
+                    )),
                 },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bg_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bg_sampler),
+                },
             ],
         });
         let dummy_scale_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scale_dummy"),
             layout: &scale_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: scale_ubo.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scale_ubo.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&dummy(INTERMEDIATE)),
                 },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         });
 
@@ -690,7 +705,11 @@ impl VideoRenderer {
         let levels = 32 - w.max(h).max(1).leading_zeros();
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("background"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -711,8 +730,16 @@ impl VideoRenderer {
                     aspect: wgpu::TextureAspect::All,
                 },
                 &level_img,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh) },
-                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * lw),
+                    rows_per_image: Some(lh),
+                },
+                wgpu::Extent3d {
+                    width: lw,
+                    height: lh,
+                    depth_or_array_layers: 1,
+                },
             );
             if level + 1 < levels {
                 level_img = image::imageops::resize(
@@ -728,8 +755,14 @@ impl VideoRenderer {
             label: Some("bg_group"),
             layout: &self.bg_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.bg_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.bg_sampler),
+                },
             ],
         });
         self.bg_size = [w as f32, h as f32];
@@ -1044,7 +1077,10 @@ pub fn compute_geometry(sw: u32, sh: u32, target: [u32; 2], s: &Settings) -> Geo
         .round()
         .min(full_w * 0.45)
         .min(full_h * 0.45);
-    let (tw, th) = ((full_w - 2.0 * margin).max(16.0), (full_h - 2.0 * margin).max(16.0));
+    let (tw, th) = (
+        (full_w - 2.0 * margin).max(16.0),
+        (full_h - 2.0 * margin).max(16.0),
+    );
     let cl = s.crop_l.min(sw.saturating_sub(1));
     let ct = s.crop_t.min(sh.saturating_sub(1));
     let cw = sw.saturating_sub(cl + s.crop_r).max(1) as f32;
@@ -1105,5 +1141,40 @@ pub fn compute_geometry(sw: u32, sh: u32, target: [u32; 2], s: &Settings) -> Geo
         crop_origin: [cl as f32, ct as f32],
         crop_size: [cw, ch],
         scale,
+    }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    /// Every pipeline shader must validate and translate to Metal (macOS), not just
+    /// to HLSL (the Windows path that runs day to day).
+    #[test]
+    fn shaders_translate_to_msl() {
+        for (name, src) in [
+            ("convert", include_str!("shaders/convert.wgsl")),
+            ("sharpen", include_str!("shaders/sharpen.wgsl")),
+            ("scale", include_str!("shaders/scale.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(src)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let options = naga::back::msl::Options {
+                lang_version: (2, 1),
+                ..Default::default()
+            };
+            for ep in &module.entry_points {
+                let pipeline = naga::back::msl::PipelineOptions {
+                    entry_point: Some((ep.stage, ep.name.clone())),
+                    ..Default::default()
+                };
+                naga::back::msl::write_string(&module, &info, &options, &pipeline)
+                    .unwrap_or_else(|e| panic!("{name}/{}: {e:?}", ep.name));
+            }
+        }
     }
 }

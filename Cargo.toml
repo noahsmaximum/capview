@@ -2,7 +2,7 @@
 name = "capview"
 version = "0.1.1"
 edition = "2024"
-description = "Low-latency, high-quality USB capture card viewer for Windows"
+description = "Low-latency, high-quality USB capture card viewer"
 license = "MIT"
 repository = "https://github.com/noahsmaximum/capview"
 
@@ -24,10 +24,29 @@ rfd = "0.17.2"
 ringbuf = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "wgsl"] }
+wgpu = { version = "30", default-features = false, features = ["dx12", "metal", "vulkan", "wgsl"] }
+winit = "0.30"
+
+[dev-dependencies]
+# Shader translation test (same naga as wgpu): proves the WGSL also builds for Metal.
+naga = { version = "30", features = ["wgsl-in", "msl-out"] }
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_MediaFoundation", "Win32_Media_KernelStreaming", "Win32_Media_DirectShow", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Media", "Win32_System_Performance", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_System_SystemInformation"] }
 windows-core = "0.62"
-winit = "0.30"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "AVCaptureSession", "AVMediaFormat", "AVCaptureSessionPreset", "block2", "dispatch2", "objc2-core-media", "objc2-core-video"] }
+objc2-core-foundation = "0.3"
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMFormatDescription", "CMSampleBuffer", "CMTime", "CMSync", "CMBase", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVBase", "CVPixelFormatDescription"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSValue", "NSError", "NSObject"] }
 
 [profile.dev.package."*"]
 opt-level = 2
