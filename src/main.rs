@@ -95,9 +95,11 @@ struct App {
     /// Settings as of the previous frame: auto-save waits for 1 s without changes.
     last_seen: Settings,
     assets: assets::Assets,
-    presets: Vec<String>,
-    /// Last preset loaded or saved (shown in the panel, marked if modified).
-    active_preset: Option<String>,
+    presets: Vec<settings::PresetEntry>,
+    /// Last preset loaded or saved, with its contents cached for the "modified" tag.
+    active_preset: Option<(settings::PresetEntry, Settings)>,
+    /// The presets folder is re-scanned while the panel is open (external renames etc.).
+    presets_scanned: Instant,
     preset_name: String,
 }
 
@@ -158,6 +160,7 @@ impl App {
             }),
             presets: settings::list_presets(),
             active_preset: None,
+            presets_scanned: Instant::now(),
             preset_name: String::new(),
             smoke: std::env::var("CAPVIEW_SMOKE")
                 .ok()
@@ -443,23 +446,56 @@ impl App {
 
     fn save_preset(&mut self, name: &str) {
         match settings::save_preset(name, &self.settings) {
-            Ok(()) => {
-                self.active_preset = Some(name.trim().to_owned());
-                self.presets = settings::list_presets();
-                self.toast(format!("Saved preset {}", name.trim()));
+            Ok(entry) => {
+                self.toast(format!("Saved preset {}", entry.name));
+                self.active_preset = Some((entry, self.settings.as_preset()));
+                self.refresh_presets();
             }
             Err(e) => self.toast(format!("Couldn't save preset: {e}")),
         }
     }
 
-    fn load_preset(&mut self, name: &str) {
-        match settings::load_preset(name) {
-            Some(p) => {
-                self.settings.apply_preset(&p);
-                self.active_preset = Some(name.to_owned());
-                self.toast(format!("Preset: {name}"));
+    fn update_preset(&mut self) {
+        let Some((entry, _)) = self.active_preset.clone() else { return };
+        match settings::update_preset(&entry, &self.settings) {
+            Ok(()) => {
+                self.toast(format!("Updated preset {}", entry.name));
+                self.active_preset = Some((entry, self.settings.as_preset()));
             }
-            None => self.toast(format!("Preset {name} not found")),
+            Err(e) => self.toast(format!("Couldn't update preset: {e}")),
+        }
+    }
+
+    fn load_preset(&mut self, path: &std::path::Path) {
+        let entry = self.presets.iter().find(|e| e.path == path).cloned();
+        match (entry, settings::load_preset(path)) {
+            (Some(entry), Some(p)) => {
+                self.settings.apply_preset(&p);
+                self.toast(format!("Preset: {}", entry.name));
+                self.active_preset = Some((entry, p));
+            }
+            _ => {
+                self.toast("Preset not found (renamed or deleted?)");
+                self.refresh_presets();
+            }
+        }
+    }
+
+    /// Re-read the presets folder. The active preset follows its file; if the file is
+    /// gone (renamed/deleted outside the app) it's matched by contents, else cleared.
+    fn refresh_presets(&mut self) {
+        self.presets_scanned = Instant::now();
+        self.presets = settings::list_presets();
+        if let Some((entry, cached)) = self.active_preset.take() {
+            let by_path = self.presets.iter().find(|e| e.path == entry.path).cloned();
+            self.active_preset = match by_path {
+                Some(e) => settings::load_preset(&e.path).map(|p| (e, p)),
+                None => self
+                    .presets
+                    .iter()
+                    .find(|e| settings::load_preset(&e.path).as_ref() == Some(&cached))
+                    .map(|e| (e.clone(), cached)),
+            };
         }
     }
 
@@ -588,8 +624,9 @@ impl App {
             }
             (_, Some(code)) if ctrl && digit(code).is_some() => {
                 let i = digit(code).unwrap();
-                match self.presets.get(i).cloned() {
-                    Some(name) => self.load_preset(&name),
+                self.refresh_presets();
+                match self.presets.get(i).map(|e| e.path.clone()) {
+                    Some(path) => self.load_preset(&path),
                     None => self.toast(format!("No preset in slot {}", i + 1)),
                 }
             }
@@ -642,6 +679,9 @@ impl App {
         let last_arrival_ns = cap.shared.stats.last_arrival_ns.load(Ordering::Relaxed);
         let epoch = cap.shared.epoch;
 
+        if self.show_ui && self.presets_scanned.elapsed() >= Duration::from_secs(2) {
+            self.refresh_presets();
+        }
         let Some(g) = &mut self.gfx else { return };
         match &textures {
             Some(t) => g.video.sync_source(&g.device, t),
@@ -699,14 +739,14 @@ impl App {
                 fullscreen,
                 stats: &self.stats,
                 presets: &self.presets,
-                active_preset: self.active_preset.as_deref(),
+                active_preset: self.active_preset.as_ref().map(|(e, _)| e),
                 preset_modified: false,
                 preset_name: &mut self.preset_name,
                 frame_loaded: self.assets.frame.is_some(),
                 actions: &mut actions,
             };
-            if let Some(name) = &self.active_preset {
-                view.preset_modified = settings::load_preset(name).is_none_or(|p| !view.settings.matches_preset(&p));
+            if let Some((_, cached)) = &self.active_preset {
+                view.preset_modified = !view.settings.matches_preset(cached);
             }
             let frame_tex = self.assets.frame.as_ref();
             self.egui_ctx.run_ui(raw_input, |ui| {
@@ -908,16 +948,17 @@ impl App {
                 ui::UiAction::PickBackground => self.assets.pick(assets::Kind::Background),
                 ui::UiAction::PickFrame => self.assets.pick(assets::Kind::Frame),
                 ui::UiAction::SavePreset(name) => self.save_preset(&name),
-                ui::UiAction::LoadPreset(name) => self.load_preset(&name),
-                ui::UiAction::DeletePreset(name) => {
-                    match settings::delete_preset(&name) {
-                        Ok(()) => self.toast(format!("Deleted preset {name}")),
+                ui::UiAction::UpdatePreset => self.update_preset(),
+                ui::UiAction::LoadPreset(path) => self.load_preset(&path),
+                ui::UiAction::DeletePreset(path) => {
+                    match settings::delete_preset(&path) {
+                        Ok(()) => self.toast("Deleted preset"),
                         Err(e) => self.toast(format!("Couldn't delete: {e}")),
                     }
-                    if self.active_preset.as_deref() == Some(name.as_str()) {
+                    if self.active_preset.as_ref().is_some_and(|(e, _)| e.path == path) {
                         self.active_preset = None;
                     }
-                    self.presets = settings::list_presets();
+                    self.refresh_presets();
                 }
                 ui::UiAction::OpenPresetsFolder => {
                     let dir = settings::presets_dir();

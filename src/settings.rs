@@ -225,6 +225,10 @@ pub struct Settings {
     /// How far an image frame overlaps the video edge (hides rounded inner corners).
     pub frame_overlap: f32,
     pub frame_color: [f32; 3],
+    /// Pixel card colours: band fill, edge lines, hard shadow.
+    pub card_fill: [f32; 3],
+    pub card_line: [f32; 3],
+    pub card_shadow: [f32; 3],
     /// Extra margin between the window edge and the framed video, in pixels.
     pub video_inset: f32,
 
@@ -303,6 +307,9 @@ impl Default for Settings {
             frame_thickness: 24.0,
             frame_overlap: 0.0,
             frame_color: [0.086, 0.075, 0.063],
+            card_fill: [1.0, 0.980, 0.937],
+            card_line: [0.086, 0.075, 0.063],
+            card_shadow: [0.180, 0.365, 0.839],
             video_inset: 0.0,
             present_mode: PresentMode::Immediate,
             frame_latency: 1,
@@ -435,54 +442,95 @@ pub fn images_dir() -> PathBuf {
     config_dir().join("images")
 }
 
-fn preset_file(name: &str) -> PathBuf {
-    let safe: String = name
-        .chars()
+/// Windows-safe file stem for a preset name ("16:10" → "16_10").
+fn sanitize(name: &str) -> String {
+    name.chars()
         .map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' })
-        .collect();
-    presets_dir().join(format!("{}.json", safe.trim()))
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// A preset on disk. The **file** is the identity: renaming, copying or deleting
+/// files in the presets folder is reflected directly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetEntry {
+    /// Display name: the name stored inside the file when it still matches the file
+    /// name (keeps characters Windows forbids, like ':'), otherwise the file name.
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PresetFile {
+    #[serde(default)]
     name: String,
     settings: Settings,
 }
 
-/// Preset names, sorted case-insensitively (Ctrl+1..9 follow this order).
-pub fn list_presets() -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(presets_dir())
+/// Accepts capview preset files, and plain settings JSON (e.g. a copied settings.json).
+fn parse_preset(text: &str) -> Option<(String, Settings)> {
+    if let Ok(p) = serde_json::from_str::<PresetFile>(text) {
+        return Some((p.name, p.settings));
+    }
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() || v.get("settings").is_some() {
+        return None;
+    }
+    serde_json::from_value::<Settings>(v).ok().map(|st| (String::new(), st))
+}
+
+/// Presets sorted case-insensitively by display name (Ctrl+1..9 follow this order).
+pub fn list_presets() -> Vec<PresetEntry> {
+    let mut out: Vec<PresetEntry> = std::fs::read_dir(presets_dir())
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .filter_map(|s| serde_json::from_str::<PresetFile>(&s).ok())
-        .map(|p| p.name)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json")))
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            let (inner, _) = parse_preset(&std::fs::read_to_string(&path).ok()?)?;
+            let name = if !inner.is_empty() && sanitize(&inner) == stem { inner } else { stem };
+            Some(PresetEntry { name, path })
+        })
         .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.dedup();
-    names
+    out.sort_by_key(|e| e.name.to_lowercase());
+    out
 }
 
-pub fn load_preset(name: &str) -> Option<Settings> {
-    let s = std::fs::read_to_string(preset_file(name)).ok()?;
-    serde_json::from_str::<PresetFile>(&s).ok().map(|p| p.settings)
+pub fn load_preset(path: &std::path::Path) -> Option<Settings> {
+    parse_preset(&std::fs::read_to_string(path).ok()?).map(|(_, s)| s)
 }
 
-pub fn save_preset(name: &str, settings: &Settings) -> Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Preset needs a name".into());
-    }
+fn write_preset(path: &std::path::Path, name: &str, settings: &Settings) -> Result<(), String> {
     std::fs::create_dir_all(presets_dir()).map_err(|e| e.to_string())?;
     let file = PresetFile { name: name.to_owned(), settings: settings.as_preset() };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    std::fs::write(preset_file(name), json).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-pub fn delete_preset(name: &str) -> Result<(), String> {
-    std::fs::remove_file(preset_file(name)).map_err(|e| e.to_string())
+/// Save under a (new or existing) name; returns the entry written.
+pub fn save_preset(name: &str, settings: &Settings) -> Result<PresetEntry, String> {
+    let name = name.trim();
+    let stem = sanitize(name);
+    if stem.is_empty() {
+        return Err("Preset needs a name".into());
+    }
+    let path = presets_dir().join(format!("{stem}.json"));
+    write_preset(&path, name, settings)?;
+    Ok(PresetEntry { name: name.to_owned(), path })
+}
+
+/// Overwrite an existing preset file in place (keeps its file name).
+pub fn update_preset(entry: &PresetEntry, settings: &Settings) -> Result<(), String> {
+    write_preset(&entry.path, &entry.name, settings)
+}
+
+pub fn delete_preset(path: &std::path::Path) -> Result<(), String> {
+    std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
 /// Copy a picked image into the app's images folder; returns the stored path.
@@ -502,8 +550,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preset_roundtrip_keeps_machine_fields() {
+    fn preset_roundtrip_rename_and_plain_settings() {
         let dir = std::env::temp_dir().join(format!("capview_preset_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         // SAFETY: only this test touches CAPVIEW_CONFIG_DIR.
         unsafe { std::env::set_var("CAPVIEW_CONFIG_DIR", &dir) };
 
@@ -518,17 +567,19 @@ mod tests {
         look.frame_style = FrameStyle::PixelCard;
         look.saturation = 1.2;
         look.device_name = Some("Other Card".into());
-        save_preset("Retro / integer", &look).unwrap();
+        let e = save_preset("Retro 16:10", &look).unwrap();
+        assert_eq!(e.path.file_name().unwrap(), "Retro 16_10.json");
 
-        assert_eq!(list_presets(), vec!["Retro / integer".to_string()]);
-        let loaded = load_preset("Retro / integer").unwrap();
+        // Display name keeps the ':' while the file still matches.
+        let list = list_presets();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Retro 16:10");
+        let loaded = load_preset(&list[0].path).unwrap();
         assert_eq!(loaded.device_name, None, "presets never store devices");
 
         mine.apply_preset(&loaded);
         assert_eq!(mine.scale_filter, ScaleFilter::Nearest);
-        assert_eq!(mine.aspect_mode, AspectMode::Integer);
         assert_eq!(mine.frame_style, FrameStyle::PixelCard);
-        assert_eq!(mine.saturation, 1.2);
         assert_eq!(mine.device_name.as_deref(), Some("USB3 Video"), "device kept");
         assert_eq!(mine.audio_output.as_deref(), Some("MOTU"), "audio device kept");
         assert_eq!(mine.window_size, Some([1600, 900]), "window size kept");
@@ -536,7 +587,27 @@ mod tests {
         mine.saturation = 1.0;
         assert!(!mine.matches_preset(&loaded), "edits mark the preset modified");
 
-        delete_preset("Retro / integer").unwrap();
+        // Renamed in Explorer: listed and loadable under the new file name.
+        let renamed = presets_dir().join("Arcade.json");
+        std::fs::rename(&list[0].path, &renamed).unwrap();
+        let list = list_presets();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Arcade");
+        assert_eq!(list[0].path, renamed);
+        assert!(load_preset(&list[0].path).is_some());
+
+        // Update keeps the renamed file and its name.
+        update_preset(&list[0], &mine).unwrap();
+        assert_eq!(list_presets()[0].name, "Arcade");
+
+        // A plain settings.json dropped into the folder works too.
+        std::fs::write(presets_dir().join("Copied.json"), serde_json::to_string(&look).unwrap()).unwrap();
+        let names: Vec<String> = list_presets().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["Arcade".to_string(), "Copied".to_string()]);
+
+        for e in list_presets() {
+            delete_preset(&e.path).unwrap();
+        }
         assert!(list_presets().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

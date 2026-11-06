@@ -1,6 +1,6 @@
 [package]
 name = "capview"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Low-latency, high-quality USB capture card viewer for Windows"
 license = "MIT"

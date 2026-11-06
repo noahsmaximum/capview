@@ -36,8 +36,9 @@ pub enum UiAction {
     PickBackground,
     PickFrame,
     SavePreset(String),
-    LoadPreset(String),
-    DeletePreset(String),
+    UpdatePreset,
+    LoadPreset(std::path::PathBuf),
+    DeletePreset(std::path::PathBuf),
     OpenPresetsFolder,
 }
 
@@ -62,8 +63,8 @@ pub struct UiView<'a> {
     pub ten_bit_available: bool,
     pub fullscreen: bool,
     pub stats: &'a Stats,
-    pub presets: &'a [String],
-    pub active_preset: Option<&'a str>,
+    pub presets: &'a [crate::settings::PresetEntry],
+    pub active_preset: Option<&'a crate::settings::PresetEntry>,
     pub preset_modified: bool,
     pub preset_name: &'a mut String,
     pub frame_loaded: bool,
@@ -493,18 +494,18 @@ fn presets_section(ui: &mut egui::Ui, v: &mut UiView) {
     theme::section(ui, 0, "Presets", true, |ui| {
         row(ui, "Preset", |ui| {
             let cur = match v.active_preset {
-                Some(n) => ellipsize(n, 22),
+                Some(e) => ellipsize(&e.name, 22),
                 None => "—".to_owned(),
             };
             egui::ComboBox::from_id_salt("preset").selected_text(cur).width(180.0).show_ui(ui, |ui| {
                 if v.presets.is_empty() {
                     ui.label(RichText::new("No presets yet").color(INK_SOFT));
                 }
-                for (i, name) in v.presets.iter().enumerate() {
-                    let label = if i < 9 { format!("{} · {name}", i + 1) } else { name.clone() };
-                    let sel = v.active_preset == Some(name.as_str());
+                for (i, e) in v.presets.iter().enumerate() {
+                    let label = if i < 9 { format!("{} · {}", i + 1, e.name) } else { e.name.clone() };
+                    let sel = v.active_preset.is_some_and(|a| a.path == e.path);
                     if ui.selectable_label(sel, label).clicked() {
-                        v.actions.push(UiAction::LoadPreset(name.clone()));
+                        v.actions.push(UiAction::LoadPreset(e.path.clone()));
                     }
                 }
             });
@@ -529,17 +530,17 @@ fn presets_section(ui: &mut egui::Ui, v: &mut UiView) {
                 v.preset_name.clear();
             }
         });
-        if let Some(active) = v.active_preset {
-            ui.horizontal(|ui| {
-                ui.add_space(LABEL_W + 8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(LABEL_W + 8.0);
+            if let Some(active) = v.active_preset {
                 if theme::button(ui, "update", Btn::Secondary)
-                    .on_hover_text(format!("Overwrite \"{active}\" with the current settings"))
+                    .on_hover_text(format!("Overwrite \"{}\" with the current settings", active.name))
                     .clicked()
                 {
-                    v.actions.push(UiAction::SavePreset(active.to_owned()));
+                    v.actions.push(UiAction::UpdatePreset);
                 }
                 // Two-step delete: first click arms, second (within 3 s) deletes.
-                let armed_id = egui::Id::unique(("delete_armed", active));
+                let armed_id = egui::Id::unique(("delete_armed", &active.path));
                 let armed_at: Option<f64> = ui.data(|d| d.get_temp(armed_id));
                 let now = ui.input(|i| i.time);
                 let armed = armed_at.is_some_and(|t| now - t < 3.0);
@@ -547,18 +548,21 @@ fn presets_section(ui: &mut egui::Ui, v: &mut UiView) {
                 let kind = if armed { Btn::Danger } else { Btn::Secondary };
                 if theme::button(ui, label, kind).clicked() {
                     if armed {
-                        v.actions.push(UiAction::DeletePreset(active.to_owned()));
+                        v.actions.push(UiAction::DeletePreset(active.path.clone()));
                         ui.data_mut(|d| d.remove::<f64>(armed_id));
                     } else {
                         ui.data_mut(|d| d.insert_temp(armed_id, now));
                         ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
                     }
                 }
-                if theme::button(ui, "folder", Btn::Secondary).clicked() {
-                    v.actions.push(UiAction::OpenPresetsFolder);
-                }
-            });
-        }
+            }
+            if theme::button(ui, "folder", Btn::Secondary)
+                .on_hover_text("Open the presets folder. Renamed, copied or deleted files show up here automatically.")
+                .clicked()
+            {
+                v.actions.push(UiAction::OpenPresetsFolder);
+            }
+        });
         note(
             ui,
             "Presets keep picture, scaling, frame, display and audio processing — not which devices you use. Ctrl+1…9 loads them.",
@@ -637,6 +641,24 @@ fn backdrop_section(ui: &mut egui::Ui, v: &mut UiView) {
         if matches!(s.frame_style, FrameStyle::Outline | FrameStyle::HardShadow) {
             row(ui, "Frame colour", |ui| {
                 ui.color_edit_button_rgb(&mut s.frame_color);
+            });
+        }
+        if s.frame_style == FrameStyle::PixelCard {
+            row(ui, "Card colours", |ui| {
+                ui.color_edit_button_rgb(&mut s.card_fill).on_hover_text("Band");
+                ui.label(RichText::new("band").font(theme::mono(16.0)).color(INK_SOFT));
+                ui.color_edit_button_rgb(&mut s.card_line).on_hover_text("Edge lines");
+                ui.label(RichText::new("lines").font(theme::mono(16.0)).color(INK_SOFT));
+                ui.color_edit_button_rgb(&mut s.card_shadow).on_hover_text("Hard shadow");
+                ui.label(RichText::new("shadow").font(theme::mono(16.0)).color(INK_SOFT));
+            });
+            row(ui, "", |ui| {
+                if theme::button(ui, "default colours", Btn::Secondary).clicked() {
+                    let d = Settings::default();
+                    s.card_fill = d.card_fill;
+                    s.card_line = d.card_line;
+                    s.card_shadow = d.card_shadow;
+                }
             });
         }
         row(ui, "Margin", |ui| {
@@ -1137,16 +1159,16 @@ pub fn draw_frame(ctx: &egui::Context, r: [f32; 4], s: &Settings, tex: Option<&c
         FrameStyle::HardShadow => shadow(video, 8.0 / ppp, rgb(s.frame_color)),
         FrameStyle::PixelCard => {
             let outer = video.expand(t);
-            shadow(outer, 6.0 / ppp, COBALT);
+            shadow(outer, 6.0 / ppp, rgb(s.card_shadow));
             for band in [
                 egui::Rect::from_min_max(outer.min, egui::pos2(outer.max.x, video.min.y)),
                 egui::Rect::from_min_max(egui::pos2(outer.min.x, video.max.y), outer.max),
                 egui::Rect::from_min_max(egui::pos2(outer.min.x, video.min.y), egui::pos2(video.min.x, video.max.y)),
                 egui::Rect::from_min_max(egui::pos2(video.max.x, video.min.y), egui::pos2(outer.max.x, video.max.y)),
             ] {
-                p.rect_filled(band, 0.0, BONE);
+                p.rect_filled(band, 0.0, rgb(s.card_fill));
             }
-            let ink = egui::Stroke::new((2.0 / ppp).max(1.0), INK);
+            let ink = egui::Stroke::new((2.0 / ppp).max(1.0), rgb(s.card_line));
             p.rect_stroke(outer, 0.0, ink, egui::StrokeKind::Inside);
             p.rect_stroke(video, 0.0, ink, egui::StrokeKind::Outside);
         }
