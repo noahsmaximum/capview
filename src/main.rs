@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! capview — low-latency, high-quality USB capture card viewer.
 
 mod assets;
@@ -844,6 +844,7 @@ impl App {
         if let Some(t) = &textures {
             g.video
                 .encode_convert(&g.queue, &mut encoder, t, &self.settings, frame_seq);
+            g.video.encode_ambient(&mut encoder, &self.settings);
         }
         let mut shot = None;
         if self.screenshot_requested && self.pending_shot.is_none() {

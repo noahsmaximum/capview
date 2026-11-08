@@ -137,6 +137,25 @@ pub enum Rotation {
 pub enum BackgroundMode {
     Color,
     Image,
+    /// Fill the bars from the live feed itself (glow / streaks / mirror).
+    Ambient,
+}
+
+/// How the Ambient background extends the video into the bars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmbientStyle {
+    /// The whole frame, heavily blurred and scaled up behind the video.
+    Glow,
+    /// Edge pixels pulled outward forever, blurring and flowing as they go.
+    Streaks,
+    /// The picture reflected across each edge, softening with distance.
+    Mirror,
+}
+
+impl AmbientStyle {
+    pub fn id(self) -> u32 {
+        self as u32
+    }
 }
 
 /// How a background image covers the window.
@@ -216,6 +235,15 @@ pub struct Settings {
     pub background_fit: ImageFit,
     /// 0 = image as-is, 1 = black.
     pub background_dim: f32,
+    pub ambient_style: AmbientStyle,
+    /// Brightness of the ambient fill (0..1.5).
+    pub ambient_strength: f32,
+    /// How soft it gets (0..1).
+    pub ambient_blur: f32,
+    /// How far it reaches before fading to the background colour (1 = forever).
+    pub ambient_reach: f32,
+    /// Flowing motion along the streaks (0 = still).
+    pub ambient_flow: f32,
     pub frame_style: FrameStyle,
     pub frame_image: Option<String>,
     /// Corner size of the 9-slice frame image, in image pixels.
@@ -301,6 +329,11 @@ impl Default for Settings {
             background_image: None,
             background_fit: ImageFit::Cover,
             background_dim: 0.0,
+            ambient_style: AmbientStyle::Glow,
+            ambient_strength: 0.85,
+            ambient_blur: 0.5,
+            ambient_reach: 0.7,
+            ambient_flow: 0.35,
             frame_style: FrameStyle::None,
             frame_image: None,
             frame_slice: 32,

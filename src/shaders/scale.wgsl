@@ -17,14 +17,18 @@ struct Params {
     dither_levels: f32,     // 0 = off, else 255 / 1023
     antiring: f32,
     frame: u32,
-    bg_mode: u32,           // 0 colour, 1 image
+    bg_mode: u32,           // 0 colour, 1 image, 2 ambient
     bg_fit: u32,            // 0 cover, 1 contain, 2 stretch, 3 center, 4 tile
     tgt_size: vec2<f32>,    // swapchain size, pixels
     bg_size: vec2<f32>,     // background image size, pixels
     bg_dim: f32,
-    _q0: u32,
-    _q1: u32,
-    _q2: u32,
+    amb_style: u32,         // 0 glow, 1 streaks, 2 mirror
+    amb_strength: f32,
+    amb_blur: f32,
+    amb_reach: f32,
+    amb_flow: f32,
+    time: f32,              // seconds, for the streak flow
+    amb_max_lod: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -32,11 +36,118 @@ struct Params {
 @group(0) @binding(2) var samp: sampler;
 @group(1) @binding(0) var bg_tex: texture_2d<f32>;
 @group(1) @binding(1) var bg_samp: sampler;
+// Blurred mip chain of the current frame (quarter res at level 0).
+@group(2) @binding(0) var amb_tex: texture_2d<f32>;
+@group(2) @binding(1) var amb_samp: sampler;
+
+// Dest-rect uv (0..1 across the on-screen video) -> normalised source uv,
+// undoing rotation (clockwise), flips and crop.
+fn src_uv(uv0: vec2<f32>) -> vec2<f32> {
+    var uv = uv0;
+    switch P.rotation {
+        case 1u: { uv = vec2<f32>(uv0.y, 1.0 - uv0.x); }
+        case 2u: { uv = vec2<f32>(1.0 - uv0.x, 1.0 - uv0.y); }
+        case 3u: { uv = vec2<f32>(1.0 - uv0.y, uv0.x); }
+        default: {}
+    }
+    if (P.flip_h == 1u) { uv.x = 1.0 - uv.x; }
+    if (P.flip_v == 1u) { uv.y = 1.0 - uv.y; }
+    return (P.crop_origin + uv * P.crop_size) / vec2<f32>(textureDimensions(src));
+}
+
+// One level of the blur chain, read with a 4-tap tent to hide texel blocks.
+fn amb_level(uv: vec2<f32>, lod: f32) -> vec3<f32> {
+    let l = clamp(lod, 0.0, P.amb_max_lod);
+    let o = 0.5 / vec2<f32>(textureDimensions(amb_tex, u32(floor(l))));
+    return 0.25 * (textureSampleLevel(amb_tex, amb_samp, uv + vec2<f32>(-o.x, -o.y), l).rgb
+        + textureSampleLevel(amb_tex, amb_samp, uv + vec2<f32>(o.x, -o.y), l).rgb
+        + textureSampleLevel(amb_tex, amb_samp, uv + vec2<f32>(-o.x, o.y), l).rgb
+        + textureSampleLevel(amb_tex, amb_samp, uv + vec2<f32>(o.x, o.y), l).rgb);
+}
+
+// The frame at `uv`, blurred by roughly `radius` source pixels. Small radii read
+// the full-res frame so the fill meets the video edge without a seam.
+fn amb_blur(uv: vec2<f32>, radius: f32) -> vec3<f32> {
+    let lod = log2(max(radius * 0.25, 1e-3));
+    let fine = textureSampleLevel(src, samp, uv, 0.0).rgb;
+    return mix(fine, amb_level(uv, max(lod, 0.0)), smoothstep(-2.0, 0.0, lod));
+}
+
+fn vnoise(x: vec2<f32>) -> f32 {
+    let i = floor(x);
+    let f = fract(x);
+    let u = f * f * (3.0 - 2.0 * f);
+    let h = vec2<u32>(vec2<i32>(i) + vec2<i32>(65536));
+    let a = hash(vec3<u32>(h, 7u));
+    let b = hash(vec3<u32>(h + vec2<u32>(1u, 0u), 7u));
+    let c = hash(vec3<u32>(h + vec2<u32>(0u, 1u), 7u));
+    let d = hash(vec3<u32>(h + vec2<u32>(1u, 1u), 7u));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Ambient fill: the live picture extended into the bars.
+fn ambient(p: vec2<f32>) -> vec3<f32> {
+    let lo = P.dst_origin;
+    let hi = P.dst_origin + P.dst_size;
+    let uv0 = (p - lo) / P.dst_size;
+    // Distance outside the video rect, per axis and overall (target pixels).
+    let ex = max(max(lo.x - p.x, p.x - hi.x), 0.0);
+    let ey = max(max(lo.y - p.y, p.y - hi.y), 0.0);
+    let d = length(vec2<f32>(ex, ey));
+    // Source pixels per target pixel.
+    let k = sqrt((P.crop_size.x * P.crop_size.y) / max(P.dst_size.x * P.dst_size.y, 1.0));
+    // Sample ~1.5 source pixels in from the edge: many sources put a bright or
+    // dark artefact column on the very border, which would streak outward.
+    let inset = max(0.5, 1.5 / max(k, 1e-3)) / P.dst_size;
+    let edge = clamp(uv0, inset, vec2<f32>(1.0) - inset);
+    let b = P.amb_blur;
+
+    var c = vec3<f32>(0.0);
+    if (P.amb_style == 0u) {
+        // Glow: the frame scaled to cover the window, very soft; near the edge it
+        // hands over to the edge pixels so the light seems to spill out.
+        let zoom = max(max(P.tgt_size.x / P.dst_size.x, P.tgt_size.y / P.dst_size.y), 1.0);
+        let centre = (lo + hi) * 0.5;
+        let g = clamp((p - centre) / (P.dst_size * zoom) + 0.5, inset, vec2<f32>(1.0) - inset);
+        let far = amb_blur(src_uv(g), mix(30.0, 220.0, b) * k * zoom);
+        let near = amb_blur(src_uv(edge), (2.0 + d * mix(0.3, 1.0, b)) * k);
+        c = mix(far, near, exp(-d / mix(40.0, 160.0, b)));
+    } else if (P.amb_style == 1u) {
+        // Streaks: each edge pixel pulled outward forever, softening as it goes.
+        c = amb_blur(src_uv(edge), (1.0 + d * mix(0.03, 0.45, b)) * k);
+        if (P.amb_flow > 0.0) {
+            // Ripples that run outward along each streak, like falling water.
+            let along = select(p.x, p.y, ex >= ey);
+            let n = vnoise(vec2<f32>(along / 4.0, d / 70.0 - P.time * 1.6));
+            let n2 = vnoise(vec2<f32>(along / 23.0 + 9.0, d / 180.0 - P.time * 0.7));
+            c *= mix(1.0, 0.45 + 0.8 * n + 0.35 * n2, P.amb_flow);
+        }
+    } else {
+        // Mirror: the picture reflected across each edge (repeating), softening.
+        let m = vec2<f32>(1.0) - abs(vec2<f32>(1.0) - (uv0 - 2.0 * floor(uv0 * 0.5)));
+        c = amb_blur(src_uv(clamp(m, inset, vec2<f32>(1.0) - inset)), (1.0 + d * mix(0.04, 0.6, b)) * k);
+    }
+    if (P.linear == 1u) {
+        c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    }
+    // Full brightness where it touches the video (no seam), easing to the chosen
+    // brightness further out.
+    c *= mix(1.0, P.amb_strength, 1.0 - exp(-d / 60.0));
+    // Reach: fade to the background colour with distance (1 = never).
+    var fade = 1.0;
+    if (P.amb_reach < 0.999) {
+        fade = exp(-d / mix(40.0, 2500.0, P.amb_reach * P.amb_reach));
+    }
+    return mix(P.background.rgb, c, fade);
+}
 
 // Letterbox fill: solid colour, or the background image mapped per fit mode.
 // LOD is picked from the on-screen scale so large photos minify cleanly.
 fn background(p: vec2<f32>) -> vec3<f32> {
     let col = P.background.rgb;
+    if (P.bg_mode == 2u) {
+        return ambient(p);
+    }
     if (P.bg_mode != 1u) {
         return col;
     }
@@ -193,7 +304,15 @@ fn hash(p: vec3<u32>) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv0 = (in.pos.xy - P.dst_origin) / P.dst_size;
     if (any(uv0 < vec2<f32>(0.0)) || any(uv0 >= vec2<f32>(1.0))) {
-        return vec4<f32>(background(in.pos.xy), 1.0);
+        var bg = background(in.pos.xy);
+        // Gradients (ambient, photos) get the same dither as the video; flat colour
+        // stays exact so black bars stay truly black.
+        if (P.bg_mode != 0u && P.dither_levels > 0.0) {
+            let q = vec2<u32>(in.pos.xy);
+            let n = hash(vec3<u32>(q, P.frame)) + hash(vec3<u32>(q + vec2<u32>(7919u, 104729u), P.frame)) - 1.0;
+            bg += vec3<f32>(n / P.dither_levels);
+        }
+        return vec4<f32>(clamp(bg, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
     // dest uv -> source uv: undo rotation (clockwise), then flips.
     var uv = uv0;

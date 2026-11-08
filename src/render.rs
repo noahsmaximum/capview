@@ -54,7 +54,29 @@ struct ScaleParams {
     target: [f32; 2],
     bg_size: [f32; 2],
     bg_dim: f32,
-    _pad2: [u32; 3],
+    amb_style: u32,
+    amb_strength: f32,
+    amb_blur: f32,
+    amb_reach: f32,
+    amb_flow: f32,
+    time: f32,
+    amb_max_lod: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AmbientLevel {
+    out_size: [f32; 2],
+    _pad: [f32; 2],
+}
+
+/// Blur chain of the current frame for the Ambient background.
+struct AmbientChain {
+    /// One pass per mip: render into `target`, reading the level above via `input`.
+    passes: Vec<(wgpu::TextureView, wgpu::BindGroup)>,
+    /// Scale-pass group 2 (all mips + trilinear sampler).
+    group: wgpu::BindGroup,
+    max_lod: f32,
 }
 
 /// Resolved colour interpretation for display in the UI.
@@ -76,6 +98,7 @@ struct SourceBinding {
     sharpen_bg: wgpu::BindGroup,
     scale_bg_rgb: wgpu::BindGroup,
     scale_bg_sharp: wgpu::BindGroup,
+    ambient: AmbientChain,
 }
 
 pub struct VideoRenderer {
@@ -107,6 +130,14 @@ pub struct VideoRenderer {
     bg_loaded: bool,
     /// Bound when no source is open, so the background still draws.
     dummy_scale_group: wgpu::BindGroup,
+    ambient_first: wgpu::RenderPipeline,
+    ambient_down: wgpu::RenderPipeline,
+    ambient_bgl: wgpu::BindGroupLayout,
+    /// Group 2 when there's no blur chain to bind.
+    dummy_ambient_group: wgpu::BindGroup,
+    /// frame_seq the blur chain was last built from.
+    ambient_seq: Option<u64>,
+    started: std::time::Instant,
 
     src: Option<SourceBinding>,
     frame_counter: u32,
@@ -291,7 +322,41 @@ impl VideoRenderer {
                 },
             ],
         });
-        let scale_layout = layout(&[&scale_bgl, &bg_bgl]);
+        let scale_layout = layout(&[&scale_bgl, &bg_bgl, &bg_bgl]);
+        let ambient_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ambient"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ambient.wgsl").into()),
+        });
+        let ambient_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ambient_bgl"),
+            entries: &[
+                ubo_entry(0),
+                tex_entry(1, float),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ambient_layout = layout(&[&ambient_bgl]);
+        let ambient_first = fullscreen_pipeline(
+            device,
+            "ambient_first",
+            &ambient_module,
+            &ambient_layout,
+            "fs_first",
+            INTERMEDIATE,
+        );
+        let ambient_down = fullscreen_pipeline(
+            device,
+            "ambient_down",
+            &ambient_module,
+            &ambient_layout,
+            "fs_down",
+            INTERMEDIATE,
+        );
         let scale_pipeline = fullscreen_pipeline(
             device,
             "scale",
@@ -354,6 +419,20 @@ impl VideoRenderer {
                 },
             ],
         });
+        let dummy_ambient_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ambient_group_dummy"),
+            layout: &bg_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy(INTERMEDIATE)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bg_sampler),
+                },
+            ],
+        });
         let dummy_scale_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scale_dummy"),
             layout: &scale_bgl,
@@ -380,6 +459,12 @@ impl VideoRenderer {
             bg_size: [1.0, 1.0],
             bg_loaded: false,
             dummy_scale_group,
+            ambient_first,
+            ambient_down,
+            ambient_bgl,
+            dummy_ambient_group,
+            ambient_seq: None,
+            started: std::time::Instant::now(),
             convert_packed,
             convert_planar,
             convert_rgb,
@@ -548,7 +633,9 @@ impl VideoRenderer {
                 ],
             })
         };
+        let ambient = self.build_ambient(device, w, h, &rgb_view);
         self.src = Some(SourceBinding {
+            ambient,
             generation: st.generation,
             format: st.format,
             width: st.width,
@@ -562,6 +649,119 @@ impl VideoRenderer {
         });
         self.last_converted_seq = u64::MAX;
         self.last_convert_params = None;
+        self.ambient_seq = None;
+    }
+
+    /// Quarter-res blur texture with a full mip chain, plus one pass per level.
+    fn build_ambient(
+        &self,
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        rgb_view: &wgpu::TextureView,
+    ) -> AmbientChain {
+        use wgpu::util::DeviceExt;
+        let (bw, bh) = (w.div_ceil(4).max(1), h.div_ceil(4).max(1));
+        let levels = 32 - bw.max(bh).leading_zeros();
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ambient"),
+            size: wgpu::Extent3d {
+                width: bw,
+                height: bh,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: INTERMEDIATE,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let level_view = |l: u32| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: l,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut passes = Vec::with_capacity(levels as usize);
+        for l in 0..levels {
+            let size = [(bw >> l).max(1) as f32, (bh >> l).max(1) as f32];
+            let ubo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ambient_level"),
+                contents: bytemuck::bytes_of(&AmbientLevel {
+                    out_size: size,
+                    _pad: [0.0; 2],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let input = if l == 0 { rgb_view.clone() } else { level_view(l - 1) };
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ambient_pass"),
+                layout: &self.ambient_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ubo.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            passes.push((level_view(l), group));
+        }
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ambient_group"),
+            layout: &self.bg_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &tex.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.bg_sampler),
+                },
+            ],
+        });
+        AmbientChain {
+            passes,
+            group,
+            max_lod: (levels - 1) as f32,
+        }
+    }
+
+    /// Rebuild the ambient blur chain from the converted frame (once per new frame,
+    /// only while the Ambient background is on).
+    pub fn encode_ambient(&mut self, encoder: &mut wgpu::CommandEncoder, s: &Settings) {
+        if s.background_mode != BackgroundMode::Ambient {
+            self.ambient_seq = None;
+            return;
+        }
+        let Some(src) = &self.src else { return };
+        if self.last_converted_seq == u64::MAX || self.ambient_seq == Some(self.last_converted_seq)
+        {
+            return;
+        }
+        for (i, (target, group)) in src.ambient.passes.iter().enumerate() {
+            let mut pass = begin_pass(encoder, "ambient", target);
+            pass.set_pipeline(if i == 0 {
+                &self.ambient_first
+            } else {
+                &self.ambient_down
+            });
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.ambient_seq = Some(self.last_converted_seq);
     }
 
     /// Encode convert (+ sharpen) when there's a new frame or params changed.
@@ -670,12 +870,22 @@ impl VideoRenderer {
                 _ => 0.0,
             },
             frame: self.frame_counter,
-            bg_mode: (s.background_mode == BackgroundMode::Image && self.bg_loaded) as u32,
+            bg_mode: match s.background_mode {
+                BackgroundMode::Image if self.bg_loaded => 1,
+                BackgroundMode::Ambient if self.ambient_seq.is_some() => 2,
+                _ => 0,
+            },
             bg_fit: s.background_fit.id(),
             target: [target_size[0] as f32, target_size[1] as f32],
             bg_size: self.bg_size,
             bg_dim: s.background_dim.clamp(0.0, 1.0),
-            _pad2: [0; 3],
+            amb_style: s.ambient_style.id(),
+            amb_strength: s.ambient_strength.clamp(0.0, 1.5),
+            amb_blur: s.ambient_blur.clamp(0.0, 1.0),
+            amb_reach: s.ambient_reach.clamp(0.0, 1.0),
+            amb_flow: s.ambient_flow.clamp(0.0, 1.0),
+            time: (self.started.elapsed().as_secs_f64() % 3600.0) as f32,
+            amb_max_lod: self.src.as_ref().map_or(0.0, |s| s.ambient.max_lod),
         };
         queue.write_buffer(&self.scale_ubo, 0, bytemuck::bytes_of(&params));
         pass.set_pipeline(&self.scale_pipeline);
@@ -686,6 +896,11 @@ impl VideoRenderer {
         };
         pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &self.bg_group, &[]);
+        let ambient = match &self.src {
+            Some(src) if self.ambient_seq.is_some() => &src.ambient.group,
+            _ => &self.dummy_ambient_group,
+        };
+        pass.set_bind_group(2, ambient, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -1154,6 +1369,7 @@ mod shader_tests {
             ("convert", include_str!("shaders/convert.wgsl")),
             ("sharpen", include_str!("shaders/sharpen.wgsl")),
             ("scale", include_str!("shaders/scale.wgsl")),
+            ("ambient", include_str!("shaders/ambient.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));

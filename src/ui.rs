@@ -577,8 +577,36 @@ fn backdrop_section(ui: &mut egui::Ui, v: &mut UiView) {
             combo(ui, "bgmode", &mut s.background_mode, &[
                 (BackgroundMode::Color, "Solid colour"),
                 (BackgroundMode::Image, "Image"),
+                (BackgroundMode::Ambient, "Ambient (from the feed)"),
             ]);
         });
+        if s.background_mode == BackgroundMode::Ambient {
+            row(ui, "Style", |ui| {
+                combo(ui, "ambstyle", &mut s.ambient_style, &[
+                    (AmbientStyle::Glow, "Glow"),
+                    (AmbientStyle::Streaks, "Streaks (waterfall)"),
+                    (AmbientStyle::Mirror, "Mirror"),
+                ]);
+            });
+            let pct = |x: f64, _: std::ops::RangeInclusive<usize>| format!("{:.0}%", x * 100.0);
+            row(ui, "Brightness", |ui| {
+                ui.add(egui::Slider::new(&mut s.ambient_strength, 0.0..=1.5).custom_formatter(pct));
+            });
+            row(ui, "Softness", |ui| {
+                ui.add(egui::Slider::new(&mut s.ambient_blur, 0.0..=1.0).custom_formatter(pct));
+            });
+            row(ui, "Reach", |ui| {
+                ui.add(egui::Slider::new(&mut s.ambient_reach, 0.0..=1.0).custom_formatter(|x, _| {
+                    if x >= 0.999 { "forever".into() } else { format!("{:.0}%", x * 100.0) }
+                }));
+            });
+            if s.ambient_style == AmbientStyle::Streaks {
+                row(ui, "Flow", |ui| {
+                    ui.add(egui::Slider::new(&mut s.ambient_flow, 0.0..=1.0).custom_formatter(pct));
+                });
+            }
+            note(ui, "Fills the bars around the picture from the picture itself. Shows when the window and video shapes differ, or with a margin.");
+        }
         if s.background_mode == BackgroundMode::Image {
             row(ui, "Image", |ui| {
                 let name = s.background_image.as_deref().map(crate::assets::short).unwrap_or_else(|| "none".into());
