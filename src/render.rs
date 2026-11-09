@@ -5,6 +5,8 @@ use crate::capture::{PixelFormat, SourceTextures};
 use crate::settings::*;
 use bytemuck::{Pod, Zeroable};
 
+mod upscale;
+
 pub const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 #[repr(C)]
@@ -61,6 +63,11 @@ struct ScaleParams {
     amb_flow: f32,
     time: f32,
     amb_max_lod: f32,
+    amb_crop: [f32; 4],
+    amb_k: f32,
+    amb_linear: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 #[repr(C)]
@@ -140,6 +147,7 @@ pub struct VideoRenderer {
     started: std::time::Instant,
 
     src: Option<SourceBinding>,
+    upscale: upscale::Upscale,
     frame_counter: u32,
     last_converted_seq: u64,
     last_convert_params: Option<[u8; std::mem::size_of::<ConvertParams>()]>,
@@ -219,7 +227,12 @@ fn ubo(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
 }
 
 impl VideoRenderer {
-    pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
+    /// `upscale_format`: UAV-capable format for the AI upscaler, if any.
+    pub fn new(
+        device: &wgpu::Device,
+        target: wgpu::TextureFormat,
+        upscale_format: Option<wgpu::TextureFormat>,
+    ) -> Self {
         let convert_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("convert"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/convert.wgsl").into()),
@@ -484,6 +497,7 @@ impl VideoRenderer {
             scale_ubo,
             sampler,
             src: None,
+            upscale: upscale::Upscale::new(device, upscale_format),
             frame_counter: 0,
             last_converted_seq: u64::MAX,
             last_convert_params: None,
@@ -764,6 +778,43 @@ impl VideoRenderer {
         self.ambient_seq = Some(self.last_converted_seq);
     }
 
+    /// AI upscale prep for this frame (after convert). Returns true when the caller
+    /// must submit `encoder` now and then call [`Self::dispatch_upscale`].
+    pub fn encode_upscale(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_size: [u32; 2],
+        s: &Settings,
+    ) -> bool {
+        let geo = self
+            .src
+            .as_ref()
+            .map(|src| compute_geometry(src.width, src.height, target_size, s));
+        let seq = self.last_converted_seq;
+        let src = if seq == u64::MAX { None } else { self.src.as_ref() };
+        self.upscale.encode(
+            device,
+            queue,
+            encoder,
+            src,
+            seq,
+            geo.as_ref(),
+            s,
+            (&self.scale_bgl, &self.scale_ubo, &self.sampler),
+        )
+    }
+
+    pub fn dispatch_upscale(&mut self) {
+        self.upscale.dispatch();
+    }
+
+    /// What the AI upscaler is doing (or why it can't), when it's switched on.
+    pub fn upscale_status(&self) -> Option<(String, bool)> {
+        self.upscale.status()
+    }
+
     /// Encode convert (+ sharpen) when there's a new frame or params changed.
     pub fn encode_convert(
         &mut self,
@@ -846,18 +897,49 @@ impl VideoRenderer {
             geo.dst_size[0],
             geo.dst_size[1],
         ];
+        // Ambient always reads the blur chain of the full converted frame.
+        let src_dims = self
+            .src
+            .as_ref()
+            .map_or([1.0, 1.0], |s| [s.width.max(1) as f32, s.height.max(1) as f32]);
+        let amb_crop = [
+            geo.crop_origin[0] / src_dims[0],
+            geo.crop_origin[1] / src_dims[1],
+            geo.crop_size[0] / src_dims[0],
+            geo.crop_size[1] / src_dims[1],
+        ];
+        let amb_k = ((geo.crop_size[0] * geo.crop_size[1])
+            / (geo.dst_size[0] * geo.dst_size[1]).max(1.0))
+        .sqrt();
+        // With the AI upscaler on, the video comes from its (gamma-encoded) output.
+        let upscaled = self.upscale.scale_source().map(|(_, out)| out);
+        let (crop_origin, crop_size, scale, video_linear) = match upscaled {
+            Some([ow, oh]) => {
+                let (ow, oh) = (ow as f32, oh as f32);
+                (
+                    [0.0, 0.0],
+                    [ow, oh],
+                    [
+                        geo.scale[0] * geo.crop_size[0] / ow,
+                        geo.scale[1] * geo.crop_size[1] / oh,
+                    ],
+                    false,
+                )
+            }
+            None => (geo.crop_origin, geo.crop_size, geo.scale, s.linear_light),
+        };
         let params = ScaleParams {
             dst_origin: geo.dst_origin,
             dst_size: geo.dst_size,
-            crop_origin: geo.crop_origin,
-            crop_size: geo.crop_size,
+            crop_origin,
+            crop_size,
             background: [s.background[0], s.background[1], s.background[2], 1.0],
-            scale: geo.scale,
+            scale,
             filter: s.scale_filter.id(),
             rotation: s.rotation as u32,
             flip_h: s.flip_h as u32,
             flip_v: s.flip_v as u32,
-            linear: s.linear_light as u32,
+            linear: video_linear as u32,
             dither_levels: if s.dither {
                 if ten_bit { 1023.0 } else { 255.0 }
             } else {
@@ -886,13 +968,19 @@ impl VideoRenderer {
             amb_flow: s.ambient_flow.clamp(0.0, 1.0),
             time: (self.started.elapsed().as_secs_f64() % 3600.0) as f32,
             amb_max_lod: self.src.as_ref().map_or(0.0, |s| s.ambient.max_lod),
+            amb_crop,
+            amb_k,
+            amb_linear: s.linear_light as u32,
+            _pad0: 0,
+            _pad1: 0,
         };
         queue.write_buffer(&self.scale_ubo, 0, bytemuck::bytes_of(&params));
         pass.set_pipeline(&self.scale_pipeline);
-        let group = match &self.src {
-            Some(src) if s.sharpen > 0.001 => &src.scale_bg_sharp,
-            Some(src) => &src.scale_bg_rgb,
-            None => &self.dummy_scale_group,
+        let group = match (&self.src, self.upscale.scale_source()) {
+            (_, Some((bg, _))) => bg,
+            (Some(src), None) if s.sharpen > 0.001 => &src.scale_bg_sharp,
+            (Some(src), None) => &src.scale_bg_rgb,
+            (None, None) => &self.dummy_scale_group,
         };
         pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &self.bg_group, &[]);
@@ -1337,8 +1425,11 @@ pub fn compute_geometry(sw: u32, sh: u32, target: [u32; 2], s: &Settings) -> Geo
     h *= s.zoom;
     let mut x = margin + (tw - w) * 0.5;
     let mut y = margin + (th - h) * 0.5;
+    // The AI upscaler renders at the exact on-screen size: keep the rect on whole
+    // pixels so its output maps 1:1.
     if matches!(s.aspect_mode, AspectMode::Integer | AspectMode::Native)
         || s.scale_filter == ScaleFilter::Nearest
+        || s.upscaler != Upscaler::Off
     {
         x = x.round();
         y = y.round();
@@ -1369,6 +1460,7 @@ mod shader_tests {
             ("convert", include_str!("shaders/convert.wgsl")),
             ("sharpen", include_str!("shaders/sharpen.wgsl")),
             ("scale", include_str!("shaders/scale.wgsl")),
+            ("upscale_prep", include_str!("shaders/upscale_prep.wgsl")),
             ("ambient", include_str!("shaders/ambient.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(src)

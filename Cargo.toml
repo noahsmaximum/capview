@@ -27,12 +27,20 @@ serde_json = "1.0.154"
 wgpu = { version = "30", default-features = false, features = ["dx12", "metal", "vulkan", "wgsl"] }
 winit = "0.30"
 
+[features]
+# NVIDIA RTX Video Super Resolution (Windows, RTX GPUs). Needs the RTX Video SDK on the
+# build machine: set NV_RTX_VIDEO_SDK, or unpack it to ./capview-deps/rtx-video-sdk.
+rtx-video = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
 [dev-dependencies]
 # Shader translation test (same naga as wgpu): proves the WGSL also builds for Metal.
 naga = { version = "30", features = ["wgsl-in", "msl-out"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_MediaFoundation", "Win32_Media_KernelStreaming", "Win32_Media_DirectShow", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Media", "Win32_System_Performance", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_MediaFoundation", "Win32_Media_KernelStreaming", "Win32_Media_DirectShow", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Media", "Win32_System_Performance", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_System_SystemInformation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
 windows-core = "0.62"
 
 [target.'cfg(unix)'.dependencies]

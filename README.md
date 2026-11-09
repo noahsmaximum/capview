@@ -54,6 +54,17 @@ cd capview
 cargo build --release
 ```
 
+**AI upscaling (optional, Windows + GeForce RTX).** Scaling → AI upscale can run NVIDIA RTX
+Video Super Resolution before the picture is fitted to the window. It needs the
+[RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk), which is under NVIDIA's license and
+not in this repo. Unpack it to `capview-deps/rtx-video-sdk` (gitignored), or point
+`NV_RTX_VIDEO_SDK` at it, then build with the feature. The build copies `nvngx_vsr.dll` next to
+the exe, and it has to ship with it.
+
+```bash
+cargo build --release --features rtx-video
+```
+
 On a Mac, `packaging/macos/bundle.sh` builds a universal `capview.app` into `dist/`.
 Linux builds and runs, but has no capture backend yet.
 

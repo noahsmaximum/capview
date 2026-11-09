@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! capview — low-latency, high-quality USB capture card viewer.
 
 mod assets;
@@ -6,6 +6,8 @@ mod audio;
 mod capture;
 mod dsp;
 mod render;
+#[cfg(all(windows, feature = "rtx-video"))]
+mod rtx;
 mod settings;
 mod theme;
 mod ui;
@@ -187,8 +189,12 @@ impl App {
         let info = adapter.get_info();
         let adapter_name = format!("{} ({:?})", info.name, info.backend);
         log::info!("adapter: {adapter_name}");
+        // Lets the AI upscaler write 10-bit (Rgb10a2) output where the GPU allows it.
+        let adapter_formats =
+            adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("capview"),
+            required_features: adapter_formats,
             required_limits: wgpu::Limits {
                 max_texture_dimension_2d: 8192,
                 ..wgpu::Limits::default()
@@ -214,7 +220,20 @@ impl App {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface unsupported");
         let format = wgpu::TextureFormat::Bgra8Unorm;
-        let video = VideoRenderer::new(&device, format);
+        let writable = |f: wgpu::TextureFormat| {
+            let u = adapter.get_texture_format_features(f).allowed_usages;
+            u.contains(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT)
+        };
+        let upscale_format = if !adapter_formats.is_empty()
+            && writable(wgpu::TextureFormat::Rgb10a2Unorm)
+        {
+            Some(wgpu::TextureFormat::Rgb10a2Unorm)
+        } else if writable(wgpu::TextureFormat::Rgba8Unorm) {
+            Some(wgpu::TextureFormat::Rgba8Unorm)
+        } else {
+            None
+        };
+        let video = VideoRenderer::new(&device, format, upscale_format);
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
@@ -754,6 +773,7 @@ impl App {
                 active_format: active_format.as_ref(),
                 state: &state,
                 resolved: g.video.resolved,
+                upscale_status: g.video.upscale_status(),
                 output_format: output_format.clone(),
                 audio_inputs: &self.audio_inputs,
                 audio_outputs: &self.audio_outputs,
@@ -845,6 +865,20 @@ impl App {
             g.video
                 .encode_convert(&g.queue, &mut encoder, t, &self.settings, frame_seq);
             g.video.encode_ambient(&mut encoder, &self.settings);
+        }
+        // The AI upscaler runs on the queue between two submissions: everything that
+        // feeds it goes first, the pass that shows its output after.
+        if g
+            .video
+            .encode_upscale(&g.device, &g.queue, &mut encoder, size, &self.settings)
+        {
+            g.queue.submit(std::iter::once(encoder.finish()));
+            g.video.dispatch_upscale();
+            encoder = g
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame"),
+                });
         }
         let mut shot = None;
         if self.screenshot_requested && self.pending_shot.is_none() {

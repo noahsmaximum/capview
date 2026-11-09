@@ -72,6 +72,47 @@ impl ScaleFilter {
     }
 }
 
+/// AI upscaling of the picture before it's fitted to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Upscaler {
+    Off,
+    /// NVIDIA RTX Video Super Resolution (Windows, GeForce RTX).
+    RtxVsr,
+}
+
+/// Resolution the AI upscaler renders at; the scaler fits that to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpscaleTarget {
+    /// Exactly the on-screen video size (sharpest; follows the window).
+    Window,
+    P1440,
+    P2160,
+    X2,
+    X3,
+    X4,
+}
+
+impl UpscaleTarget {
+    pub const ALL: [UpscaleTarget; 6] = [
+        UpscaleTarget::Window,
+        UpscaleTarget::P1440,
+        UpscaleTarget::P2160,
+        UpscaleTarget::X2,
+        UpscaleTarget::X3,
+        UpscaleTarget::X4,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            UpscaleTarget::Window => "Match window",
+            UpscaleTarget::P1440 => "1440p",
+            UpscaleTarget::P2160 => "2160p (4K)",
+            UpscaleTarget::X2 => "2x source",
+            UpscaleTarget::X3 => "3x source",
+            UpscaleTarget::X4 => "4x source",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AspectMode {
     /// Fit inside the window, keep source aspect.
@@ -215,6 +256,10 @@ pub struct Settings {
 
     // --- geometry ---
     pub scale_filter: ScaleFilter,
+    pub upscaler: Upscaler,
+    pub upscale_target: UpscaleTarget,
+    /// RTX VSR quality 1 (low) ..= 4 (ultra).
+    pub vsr_quality: u8,
     pub antiring: f32,
     pub linear_light: bool,
     pub aspect_mode: AspectMode,
@@ -312,6 +357,9 @@ impl Default for Settings {
             gamma: 1.0,
             sharpen: 0.0,
             scale_filter: ScaleFilter::Lanczos3,
+            upscaler: Upscaler::Off,
+            upscale_target: UpscaleTarget::Window,
+            vsr_quality: 4,
             antiring: 0.6,
             linear_light: false,
             aspect_mode: AspectMode::Fit,

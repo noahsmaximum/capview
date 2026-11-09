@@ -50,6 +50,8 @@ pub struct UiView<'a> {
     pub active_format: Option<&'a FormatInfo>,
     pub state: &'a CaptureState,
     pub resolved: ResolvedColor,
+    /// AI upscaler: what it's doing (true) or why it can't (false).
+    pub upscale_status: Option<(String, bool)>,
     pub output_format: Option<String>,
     pub audio_inputs: &'a [String],
     pub audio_outputs: &'a [String],
@@ -386,6 +388,42 @@ fn scaling_section(ui: &mut egui::Ui, v: &mut UiView) {
                 ScaleFilter::ALL.iter().map(|f| (*f, f.label())).collect();
             combo(ui, "filter", &mut s.scale_filter, &opts);
         });
+        row(ui, "AI upscale", |ui| {
+            combo(
+                ui,
+                "upscaler",
+                &mut s.upscaler,
+                &[
+                    (Upscaler::Off, "Off"),
+                    (Upscaler::RtxVsr, "NVIDIA RTX Video Super Resolution"),
+                ],
+            );
+        });
+        if s.upscaler != Upscaler::Off {
+            row(ui, "Upscale to", |ui| {
+                let opts: Vec<(UpscaleTarget, &str)> =
+                    UpscaleTarget::ALL.iter().map(|t| (*t, t.label())).collect();
+                combo(ui, "upscale_target", &mut s.upscale_target, &opts);
+            });
+            row(ui, "Quality", |ui| {
+                combo(
+                    ui,
+                    "vsr_quality",
+                    &mut s.vsr_quality,
+                    &[(1, "Low"), (2, "Medium"), (3, "High"), (4, "Ultra")],
+                );
+            });
+            if let Some((text, ok)) = &v.upscale_status {
+                row(ui, "", |ui| {
+                    let col = if *ok { PINE } else { VERMILLION };
+                    ui.label(RichText::new(text).size(12.0).color(col));
+                });
+            }
+            note(
+                ui,
+                "The filter below fits the upscaled picture to the window (1:1 in Match window).",
+            );
+        }
         if matches!(
             s.scale_filter,
             ScaleFilter::CatmullRom | ScaleFilter::Lanczos2 | ScaleFilter::Lanczos3
@@ -1032,6 +1070,9 @@ pub fn stats_overlay(ctx: &egui::Context, v: &UiView) {
                         }
                     } else {
                         kv(ui, "SOURCE", "none".into(), BONE);
+                    }
+                    if let Some((text, ok)) = &v.upscale_status {
+                        kv(ui, "UPSCALE", text.clone(), if *ok { BONE } else { VERMILLION });
                     }
                     let r = v.resolved;
                     if r.matrix == 0 {

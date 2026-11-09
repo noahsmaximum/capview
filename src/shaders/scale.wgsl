@@ -29,6 +29,13 @@ struct Params {
     amb_flow: f32,
     time: f32,              // seconds, for the streak flow
     amb_max_lod: f32,
+    // Ambient reads the blur chain of the whole converted frame even when the video
+    // itself comes from the AI upscaler: crop as normalised uv origin.xy / size.zw.
+    amb_crop: vec4<f32>,
+    amb_k: f32,             // source px per screen px, for blur radii
+    amb_linear: u32,        // blur chain holds linear light
+    _pad0: u32,
+    _pad1: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -52,7 +59,7 @@ fn src_uv(uv0: vec2<f32>) -> vec2<f32> {
     }
     if (P.flip_h == 1u) { uv.x = 1.0 - uv.x; }
     if (P.flip_v == 1u) { uv.y = 1.0 - uv.y; }
-    return (P.crop_origin + uv * P.crop_size) / vec2<f32>(textureDimensions(src));
+    return P.amb_crop.xy + uv * P.amb_crop.zw;
 }
 
 // One level of the blur chain, read with a 4-tap tent to hide texel blocks.
@@ -95,7 +102,7 @@ fn ambient(p: vec2<f32>) -> vec3<f32> {
     let ey = max(max(lo.y - p.y, p.y - hi.y), 0.0);
     let d = length(vec2<f32>(ex, ey));
     // Source pixels per target pixel.
-    let k = sqrt((P.crop_size.x * P.crop_size.y) / max(P.dst_size.x * P.dst_size.y, 1.0));
+    let k = P.amb_k;
     // Sample ~1.5 source pixels in from the edge: many sources put a bright or
     // dark artefact column on the very border, which would streak outward.
     let inset = max(0.5, 1.5 / max(k, 1e-3)) / P.dst_size;
@@ -127,7 +134,7 @@ fn ambient(p: vec2<f32>) -> vec3<f32> {
         let m = vec2<f32>(1.0) - abs(vec2<f32>(1.0) - (uv0 - 2.0 * floor(uv0 * 0.5)));
         c = amb_blur(src_uv(clamp(m, inset, vec2<f32>(1.0) - inset)), (1.0 + d * mix(0.04, 0.6, b)) * k);
     }
-    if (P.linear == 1u) {
+    if (P.amb_linear == 1u) {
         c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
     }
     // Full brightness where it touches the video (no seam), easing to the chosen
