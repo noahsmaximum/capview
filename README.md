@@ -29,10 +29,6 @@ capture straight into the GPU, high-quality scaling, and a pixel-editorial UI.
 - **Audio passthrough:** the card's audio input is matched automatically. Drift-corrected resampling keeps a fixed delay, which you can set.
   - Clean-up for noisy cards: DC blocker, spectral hiss reduction (learns the card's noise while it's quiet) and a noise gate.
   - Includes a fix for MS2109 cards, which report "96 kHz mono" but actually send 48 kHz stereo.
-- **Robust:**
-  - Recovers from unplug/replug and stream stalls.
-  - Can't hang on a wedged driver.
-  - Warns when a mode delivers fewer frames than it advertises.
 - **Stats HUD:** fps, pacing jitter, drops, frame→present latency, audio buffer, frame-time graph.
 - **Screenshots** at source resolution (PNG).
 
@@ -92,12 +88,6 @@ Linux builds and runs, but has no capture backend yet.
 
 Settings are saved to `%APPDATA%\capview\settings.json` one second after each change. Presets live in `presets\` and imported images in `images\` in the same folder.
 
-## Tips
-
-- **Lowest latency:** Immediate present + 1 frame in flight + fullscreen. In fullscreen the frame can skip the desktop compositor.
-- **Use a good USB 3 port.** A flaky port shows up as stalls, or the card dropping off the bus ("Device Descriptor Request Failed").
-- **"4K" on cheap cards usually means 4K input.** MS2130-class cards scale it to 1080p before USB, so feeding them 1080p gives the sharpest picture.
-- **USB 2.0 cards (MS2109)** only reach 1080p via MJPEG, at ~30 fps. Their 720p60 mode delivers a true 60.
 
 ## How it works
 
