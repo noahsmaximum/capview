@@ -55,11 +55,13 @@ Video Super Resolution before the picture is fitted to the window. It needs the
 [RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk), which is under NVIDIA's license and
 not in this repo. Unpack it to `capview-deps/rtx-video-sdk` (gitignored), or point
 `NV_RTX_VIDEO_SDK` at it, then build with the feature. The build copies `nvngx_vsr.dll` next to
-the exe, and it has to ship with it.
+the exe, and it has to ship with it. The release zip already includes it.
 
 ```bash
 cargo build --release --features rtx-video
 ```
+
+`packaging/windows/package.ps1` builds the Windows release zip this way.
 
 **Frame generation (Windows + NVIDIA Turing or newer).** Scaling → Frame gen inserts an
 interpolated frame between each pair of source frames (2× motion). The GPU's optical-flow
@@ -118,7 +120,10 @@ capture thread (MMCSS "Capture")            render thread (winit)
 
 - UI style inspired by the [OVERWORLD design system](https://uiverse.io/ui-kits/overworld) on Uiverse.
 - Fonts: [Pixelify Sans](https://fonts.google.com/specimen/Pixelify+Sans), [Inter](https://fonts.google.com/specimen/Inter) and [VT323](https://fonts.google.com/specimen/VT323), all under the SIL Open Font License (see `assets/fonts/`).
+- AI upscaling uses the [NVIDIA RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk) (see `licenses/NVIDIA-RTX-Video-SDK.txt`).
 
 ## License
 
-MIT (fonts excluded; they are OFL).
+MIT, except:
+- the fonts, which are OFL;
+- the NVIDIA components in the Windows build (`nvngx_vsr.dll` and the NGX code linked into the exe), which are under NVIDIA's license.

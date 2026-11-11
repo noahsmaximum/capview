@@ -158,6 +158,14 @@ pub fn settings_panel(ui: &mut egui::Ui, v: &mut UiView) {
                             {
                                 v.actions.push(UiAction::Close);
                             }
+                            let (label, tip) = if v.fullscreen {
+                                ("windowed", "Exit fullscreen (F11 / Esc)")
+                            } else {
+                                ("fullscreen", "Fullscreen (F11 / Alt+Enter)")
+                            };
+                            if theme::button(ui, label, Btn::Primary).on_hover_text(tip).clicked() {
+                                v.actions.push(UiAction::ToggleFullscreen);
+                            }
                         });
                     });
                     ui.horizontal(|ui| {
@@ -803,15 +811,6 @@ fn display_section(ui: &mut egui::Ui, v: &mut UiView) {
                     .fixed_decimals(1),
             );
         });
-        ui.add_space(2.0);
-        let label = if v.fullscreen {
-            "exit fullscreen"
-        } else {
-            "fullscreen"
-        };
-        if theme::button(ui, label, Btn::Primary).clicked() {
-            v.actions.push(UiAction::ToggleFullscreen);
-        }
         note(
             ui,
             "Lowest latency: Immediate + 1 frame in flight + fullscreen (the frame skips the compositor).",

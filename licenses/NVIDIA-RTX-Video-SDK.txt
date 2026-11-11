@@ -1,0 +1,21 @@
+NVIDIA RTX Video SDK components
+
+The Windows build of capview includes object code from the NVIDIA RTX Video SDK:
+nvngx_vsr.dll, and NVIDIA NGX code linked into capview.exe.
+Copyright (c) NVIDIA Corporation. All rights reserved.
+
+These components are NOT covered by capview's MIT license. They are provided under
+the NVIDIA RTX Video SDK License, and you may use them only as part of capview:
+
+- You may not reverse engineer, decompile, disassemble or modify them.
+- You may not distribute them on their own or separately from capview.
+- You may not sell, rent, sublicense or transfer them.
+- They are provided "AS IS", without warranty of any kind. NVIDIA and its licensors
+  are not liable for any damages arising from their use.
+- NVIDIA and its licensors keep all rights, title and interest in them.
+
+The RTX Video SDK is available from https://developer.nvidia.com/rtx-video-sdk under
+NVIDIA's own license.
+
+capview's frame generation calls nvofapi64.dll, which is part of the NVIDIA display
+driver installed on your system. It is not distributed with capview.
