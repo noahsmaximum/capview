@@ -5,6 +5,7 @@ use crate::capture::{PixelFormat, SourceTextures};
 use crate::settings::*;
 use bytemuck::{Pod, Zeroable};
 
+mod framegen;
 mod upscale;
 
 pub const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -148,6 +149,7 @@ pub struct VideoRenderer {
 
     src: Option<SourceBinding>,
     upscale: upscale::Upscale,
+    framegen: framegen::FrameGen,
     frame_counter: u32,
     last_converted_seq: u64,
     last_convert_params: Option<[u8; std::mem::size_of::<ConvertParams>()]>,
@@ -498,6 +500,7 @@ impl VideoRenderer {
             sampler,
             src: None,
             upscale: upscale::Upscale::new(device, upscale_format),
+            framegen: framegen::FrameGen::new(device),
             frame_counter: 0,
             last_converted_seq: u64::MAX,
             last_convert_params: None,
@@ -792,18 +795,62 @@ impl VideoRenderer {
             .src
             .as_ref()
             .map(|src| compute_geometry(src.width, src.height, target_size, s));
+        self.framegen.encode_warp(queue, encoder, s);
         let seq = self.last_converted_seq;
         let src = if seq == u64::MAX { None } else { self.src.as_ref() };
+        // Re-upscale whenever the frame on screen changes: a new source frame, or the
+        // switch between a generated frame and the real one.
+        let generated = self.framegen.showing().map(|(_, view, id)| (view, id));
+        let display_seq = seq.wrapping_mul(2) | generated.is_some() as u64;
         self.upscale.encode(
             device,
             queue,
             encoder,
             src,
-            seq,
+            display_seq,
             geo.as_ref(),
             s,
             (&self.scale_bgl, &self.scale_ubo, &self.sampler),
+            generated,
         )
+    }
+
+    /// Frame generation for this render (after convert, before the upscaler).
+    /// Returns true when the caller must submit `encoder` now and then call
+    /// [`Self::dispatch_framegen`].
+    pub fn encode_framegen(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        arrival: Option<std::time::Instant>,
+        s: &Settings,
+    ) -> bool {
+        let seq = self.last_converted_seq;
+        let src = if seq == u64::MAX { None } else { self.src.as_ref() };
+        self.framegen.encode(
+            device,
+            queue,
+            encoder,
+            src,
+            seq,
+            arrival,
+            s,
+            (&self.scale_bgl, &self.scale_ubo, &self.sampler),
+        )
+    }
+
+    pub fn dispatch_framegen(&mut self) {
+        self.framegen.dispatch();
+    }
+
+    /// When the next render is due to swap a generated frame for the real one.
+    pub fn framegen_due(&self) -> Option<std::time::Instant> {
+        self.framegen.due()
+    }
+
+    pub fn framegen_status(&self) -> Option<(String, bool)> {
+        self.framegen.status()
     }
 
     pub fn dispatch_upscale(&mut self) {
@@ -976,11 +1023,13 @@ impl VideoRenderer {
         };
         queue.write_buffer(&self.scale_ubo, 0, bytemuck::bytes_of(&params));
         pass.set_pipeline(&self.scale_pipeline);
-        let group = match (&self.src, self.upscale.scale_source()) {
-            (_, Some((bg, _))) => bg,
-            (Some(src), None) if s.sharpen > 0.001 => &src.scale_bg_sharp,
-            (Some(src), None) => &src.scale_bg_rgb,
-            (None, None) => &self.dummy_scale_group,
+        let generated = self.framegen.showing().map(|(bg, _, _)| bg);
+        let group = match (&self.src, self.upscale.scale_source(), generated) {
+            (_, Some((bg, _)), _) => bg,
+            (Some(_), None, Some(bg)) => bg,
+            (Some(src), None, None) if s.sharpen > 0.001 => &src.scale_bg_sharp,
+            (Some(src), None, None) => &src.scale_bg_rgb,
+            (None, None, _) => &self.dummy_scale_group,
         };
         pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &self.bg_group, &[]);
@@ -1461,6 +1510,8 @@ mod shader_tests {
             ("sharpen", include_str!("shaders/sharpen.wgsl")),
             ("scale", include_str!("shaders/scale.wgsl")),
             ("upscale_prep", include_str!("shaders/upscale_prep.wgsl")),
+            ("framegen_luma", include_str!("shaders/framegen_luma.wgsl")),
+            ("framegen_warp", include_str!("shaders/framegen_warp.wgsl")),
             ("ambient", include_str!("shaders/ambient.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(src)

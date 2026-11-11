@@ -8,6 +8,8 @@ mod dsp;
 mod render;
 #[cfg(all(windows, feature = "rtx-video"))]
 mod rtx;
+#[cfg(windows)]
+mod nvof;
 mod settings;
 mod theme;
 mod ui;
@@ -90,6 +92,10 @@ struct App {
     pending_shot: Option<(PendingShot, Arc<AtomicBool>)>,
     toast: Option<(String, Instant)>,
     next_ui_repaint: Option<Instant>,
+    /// Wakes the loop at a precise instant (frame generation's real-frame swap);
+    /// winit's WaitUntil is only as fine as the 15.6 ms system tick.
+    pacer: std::sync::mpsc::Sender<Instant>,
+    pacer_sent: Option<Instant>,
     last_idle_redraw: Instant,
     last_render: Instant,
     /// CAPVIEW_SMOKE=<secs>: log stats, screenshot at 3 s, exit after N s.
@@ -114,6 +120,7 @@ impl App {
             settings.show_stats = std::env::var("CAPVIEW_SMOKE_UI").as_deref() != Ok("panel");
         }
         let proxy_for_assets = proxy.clone();
+        let pacer = spawn_pacer(proxy.clone());
         let last_seen = settings.clone();
         Self {
             proxy,
@@ -151,6 +158,8 @@ impl App {
             pending_shot: None,
             toast: None,
             next_ui_repaint: None,
+            pacer,
+            pacer_sent: None,
             last_idle_redraw: Instant::now(),
             last_render: Instant::now(),
             last_seen,
@@ -774,6 +783,7 @@ impl App {
                 state: &state,
                 resolved: g.video.resolved,
                 upscale_status: g.video.upscale_status(),
+                framegen_status: g.video.framegen_status(),
                 output_format: output_format.clone(),
                 audio_inputs: &self.audio_inputs,
                 audio_outputs: &self.audio_outputs,
@@ -865,6 +875,21 @@ impl App {
             g.video
                 .encode_convert(&g.queue, &mut encoder, t, &self.settings, frame_seq);
             g.video.encode_ambient(&mut encoder, &self.settings);
+        }
+        // Frame generation runs on the queue between submissions, like the upscaler
+        // below (which then upscales whichever frame is on screen).
+        let arrival = (last_arrival_ns > 0).then(|| epoch + Duration::from_nanos(last_arrival_ns));
+        if g
+            .video
+            .encode_framegen(&g.device, &g.queue, &mut encoder, arrival, &self.settings)
+        {
+            g.queue.submit(std::iter::once(encoder.finish()));
+            g.video.dispatch_framegen();
+            encoder = g
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame"),
+                });
         }
         // The AI upscaler runs on the queue between two submissions: everything that
         // feeds it goes first, the pass that shows its output after.
@@ -967,6 +992,12 @@ impl App {
         }
         window.pre_present_notify();
         g.queue.present(frame);
+        if let Some(due) = g.video.framegen_due()
+            && self.pacer_sent != Some(due)
+        {
+            self.pacer_sent = Some(due);
+            let _ = self.pacer.send(due);
+        }
         for id in &to_free {
             g.egui_renderer.free_texture(id);
         }
@@ -1137,6 +1168,39 @@ fn auto_pick(devices: &[DeviceInfo]) -> Option<DeviceInfo> {
 }
 
 /// The GPU API each OS is best at; override with WGPU_BACKEND.
+/// Thread that sends a Wake at each requested instant. `thread::sleep` uses a
+/// high-resolution waitable timer on Windows; the last half-millisecond is spun.
+fn spawn_pacer(proxy: EventLoopProxy<UserEvent>) -> std::sync::mpsc::Sender<Instant> {
+    let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+    std::thread::Builder::new()
+        .name("pacer".into())
+        .spawn(move || {
+            while let Ok(mut due) = rx.recv() {
+                // Only the newest deadline matters.
+                while let Ok(d) = rx.try_recv() {
+                    due = d;
+                }
+                loop {
+                    let now = Instant::now();
+                    if now >= due {
+                        break;
+                    }
+                    let left = due - now;
+                    if left > Duration::from_micros(700) {
+                        std::thread::sleep(left - Duration::from_micros(500));
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+                if proxy.send_event(UserEvent::Wake).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn pacer");
+    tx
+}
+
 fn native_backend() -> wgpu::Backends {
     if cfg!(target_os = "windows") {
         wgpu::Backends::DX12
@@ -1413,6 +1477,14 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 if let Some(e) = &self.audio_error {
                     log::info!("SMOKE audio_error={e}");
+                }
+                if let Some(g) = &self.gfx {
+                    if let Some(st) = g.video.framegen_status() {
+                        log::info!("SMOKE framegen={st:?}");
+                    }
+                    if let Some(st) = g.video.upscale_status() {
+                        log::info!("SMOKE upscale={st:?}");
+                    }
                 }
             }
             if !shot_done && el > 3.0 {

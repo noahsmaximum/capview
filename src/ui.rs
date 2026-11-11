@@ -52,6 +52,8 @@ pub struct UiView<'a> {
     pub resolved: ResolvedColor,
     /// AI upscaler: what it's doing (true) or why it can't (false).
     pub upscale_status: Option<(String, bool)>,
+    /// Frame generation: what it's doing (true) or why it can't (false).
+    pub framegen_status: Option<(String, bool)>,
     pub output_format: Option<String>,
     pub audio_inputs: &'a [String],
     pub audio_outputs: &'a [String],
@@ -422,6 +424,24 @@ fn scaling_section(ui: &mut egui::Ui, v: &mut UiView) {
             note(
                 ui,
                 "The filter below fits the upscaled picture to the window (1:1 in Match window).",
+            );
+        }
+        row(ui, "Frame gen", |ui| {
+            theme::check(ui, &mut s.frame_gen, "2× motion smoothing (NVIDIA)");
+        });
+        if s.frame_gen {
+            row(ui, "Artifact guard", |ui| {
+                ui.add(egui::Slider::new(&mut s.frame_gen_guard, 0.0..=1.0).fixed_decimals(2));
+            });
+            if let Some((text, ok)) = &v.framegen_status {
+                row(ui, "", |ui| {
+                    let col = if *ok { PINE } else { VERMILLION };
+                    ui.label(RichText::new(text).size(12.0).color(col));
+                });
+            }
+            note(
+                ui,
+                "Inserts a generated frame between each pair; the real frame shows half a frame later. For watching, not twitchy play. Needs a display at 2× the source rate.",
             );
         }
         if matches!(
@@ -1073,6 +1093,11 @@ pub fn stats_overlay(ctx: &egui::Context, v: &UiView) {
                     }
                     if let Some((text, ok)) = &v.upscale_status {
                         kv(ui, "UPSCALE", text.clone(), if *ok { BONE } else { VERMILLION });
+                    }
+                    if v.settings.frame_gen
+                        && let Some((text, ok)) = &v.framegen_status
+                    {
+                        kv(ui, "FRAMEGEN", text.clone(), if *ok { BONE } else { VERMILLION });
                     }
                     let r = v.resolved;
                     if r.matrix == 0 {

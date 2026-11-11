@@ -260,6 +260,10 @@ pub struct Settings {
     pub upscale_target: UpscaleTarget,
     /// RTX VSR quality 1 (low) ..= 4 (ultra).
     pub vsr_quality: u8,
+    /// NVIDIA optical-flow frame generation (2×, adds ~half a source frame of latency).
+    pub frame_gen: bool,
+    /// Artifact guard for generated frames: 0 = off .. 1 = strictest.
+    pub frame_gen_guard: f32,
     pub antiring: f32,
     pub linear_light: bool,
     pub aspect_mode: AspectMode,
@@ -360,6 +364,8 @@ impl Default for Settings {
             upscaler: Upscaler::Off,
             upscale_target: UpscaleTarget::Window,
             vsr_quality: 4,
+            frame_gen: false,
+            frame_gen_guard: 0.5,
             antiring: 0.6,
             linear_light: false,
             aspect_mode: AspectMode::Fit,

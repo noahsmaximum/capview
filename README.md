@@ -65,6 +65,13 @@ the exe, and it has to ship with it.
 cargo build --release --features rtx-video
 ```
 
+**Frame generation (Windows + NVIDIA Turing or newer).** Scaling → Frame gen inserts an
+interpolated frame between each pair of source frames (2× motion). The GPU's optical-flow
+engine measures motion in both directions, and capview's own shader warps and blends the
+two frames, easing into a crossfade wherever no motion fits. The real frame is shown half a
+source frame later, so it's for watching, not twitchy play. It uses the driver's
+`nvofapi64.dll`; no SDK or extra files are needed.
+
 On a Mac, `packaging/macos/bundle.sh` builds a universal `capview.app` into `dist/`.
 Linux builds and runs, but has no capture backend yet.
 

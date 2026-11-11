@@ -41,6 +41,8 @@ struct Targets {
     src_generation: u64,
     from_sharp: bool,
     prep_bg: wgpu::BindGroup,
+    /// Prep reading frame generation's output instead, keyed by its texture id.
+    prep_bg_gen: Option<(u64, wgpu::BindGroup)>,
     /// Scale-pass group 0 sampling `output`.
     scale_bg: wgpu::BindGroup,
     /// `output` holds a finished upscale.
@@ -211,6 +213,7 @@ impl Upscale {
         geo: Option<&Geometry>,
         s: &Settings,
         scale: (&wgpu::BindGroupLayout, &wgpu::Buffer, &wgpu::Sampler),
+        generated: Option<(&wgpu::TextureView, u64)>,
     ) -> bool {
         self.active = false;
         self.pending = None;
@@ -269,6 +272,26 @@ impl Upscale {
         }
 
         let quality = s.vsr_quality.clamp(1, 4);
+        if let Some((view, id)) = generated {
+            let t = self.targets.as_mut().expect("targets");
+            if t.prep_bg_gen.as_ref().is_none_or(|(i, _)| *i != id) {
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscale_prep_generated"),
+                    layout: &self.prep_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.prep_ubo.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                    ],
+                });
+                t.prep_bg_gen = Some((id, bg));
+            }
+        }
         let t = self.targets.as_ref().expect("targets");
         self.active = true;
         if t.valid && frame_seq == self.last_seq && quality == self.last_quality {
@@ -287,7 +310,11 @@ impl Upscale {
         {
             let mut pass = super::begin_pass(encoder, "upscale_prep", &t.input_view);
             pass.set_pipeline(self.prep_pipeline.as_ref().expect("prep pipeline"));
-            pass.set_bind_group(0, &t.prep_bg, &[]);
+            let bg = match (&generated, &t.prep_bg_gen) {
+                (Some(_), Some((_, bg))) => bg,
+                _ => &t.prep_bg,
+            };
+            pass.set_bind_group(0, bg, &[]);
             pass.draw(0..3, 0..1);
         }
         // Empty pass: leaves `output` as a render target in wgpu's tracking, which is
@@ -428,6 +455,7 @@ impl Upscale {
             src_generation: src.generation,
             from_sharp,
             prep_bg,
+            prep_bg_gen: None,
             scale_bg,
             valid: false,
         }
