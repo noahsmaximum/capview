@@ -1,5 +1,5 @@
 //! NVIDIA Optical Flow (NVOFA hardware) on wgpu's own D3D12 device: forward and
-//! backward motion vectors between two luma frames, for capview's frame generation.
+//! backward motion vectors between two luma frames, for MaxCap's frame generation.
 //!
 //! `nvofapi64.dll` ships with the NVIDIA driver, so nothing from the SDK is
 //! compiled in or redistributed. The engine runs on its own queue and syncs with

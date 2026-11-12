@@ -1,4 +1,4 @@
 /target
 *.png.tmp
-/capview-deps
+/maxcap-deps
 /dist

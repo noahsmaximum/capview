@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>capview</string>
+    <string>MaxCap</string>
     <key>CFBundleDisplayName</key>
-    <string>capview</string>
+    <string>MaxCap</string>
     <key>CFBundleIdentifier</key>
-    <string>com.github.noahsmaximum.capview</string>
+    <string>com.github.noahsmaximum.maxcap</string>
     <key>CFBundleExecutable</key>
-    <string>capview</string>
+    <string>maxcap</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
@@ -23,8 +23,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSCameraUsageDescription</key>
-    <string>capview shows the video from your USB capture card.</string>
+    <string>MaxCap shows the video from your USB capture card.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>capview plays the audio from your USB capture card.</string>
+    <string>MaxCap plays the audio from your USB capture card.</string>
 </dict>
 </plist>

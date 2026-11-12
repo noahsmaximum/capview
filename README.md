@@ -1,9 +1,9 @@
-# capview
+# MaxCap
 
 A clean, low-latency viewer for USB HDMI capture cards on Windows and macOS: uncompressed
 capture straight into the GPU, high-quality scaling, and a pixel-editorial UI.
 
-![capview settings panel](docs/screenshot.png)
+![MaxCap settings panel](docs/screenshot.png)
 
 ## Highlights
 
@@ -34,26 +34,26 @@ capture straight into the GPU, high-quality scaling, and a pixel-editorial UI.
 
 ## Install
 
-Download the zip for your OS from [Releases](https://github.com/noahsmaximum/capview/releases).
+Download the zip for your OS from [Releases](https://github.com/noahsmaximum/maxcap/releases).
 It picks your capture card automatically. Webcams and virtual cameras are skipped.
 
-- **Windows 10/11** with a DirectX 12 GPU: unzip and run `capview.exe`.
-- **macOS 11+** (Apple Silicon or Intel), *experimental*: unzip and drag `capview.app` to
+- **Windows 10/11** with a DirectX 12 GPU: unzip and run `maxcap.exe`.
+- **macOS 11+** (Apple Silicon or Intel), *experimental*: unzip and drag `MaxCap.app` to
   Applications. The app isn't notarized, so the first time, right-click it → **Open** → **Open**.
   Allow camera and microphone access when asked; that's how macOS lets apps read capture cards.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/noahsmaximum/capview
-cd capview
+git clone https://github.com/noahsmaximum/maxcap
+cd maxcap
 cargo build --release
 ```
 
 **AI upscaling (optional, Windows + GeForce RTX).** Scaling → AI upscale can run NVIDIA RTX
 Video Super Resolution before the picture is fitted to the window. It needs the
 [RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk), which is under NVIDIA's license and
-not in this repo. Unpack it to `capview-deps/rtx-video-sdk` (gitignored), or point
+not in this repo. Unpack it to `maxcap-deps/rtx-video-sdk` (gitignored), or point
 `NV_RTX_VIDEO_SDK` at it, then build with the feature. The build copies `nvngx_vsr.dll` next to
 the exe, and it has to ship with it. The release zip already includes it.
 
@@ -65,12 +65,12 @@ cargo build --release --features rtx-video
 
 **Frame generation (Windows + NVIDIA Turing or newer).** Scaling → Frame gen inserts an
 interpolated frame between each pair of source frames (2× motion). The GPU's optical-flow
-engine measures motion in both directions, and capview's own shader warps and blends the
+engine measures motion in both directions, and MaxCap's own shader warps and blends the
 two frames, easing into a crossfade wherever no motion fits. The real frame is shown half a
 source frame later, so it's for watching, not twitchy play. It uses the driver's
 `nvofapi64.dll`; no SDK or extra files are needed.
 
-On a Mac, `packaging/macos/bundle.sh` builds a universal `capview.app` into `dist/`.
+On a Mac, `packaging/macos/bundle.sh` builds a universal `MaxCap.app` into `dist/`.
 Linux builds and runs, but has no capture backend yet.
 
 ## Controls
@@ -88,7 +88,7 @@ Linux builds and runs, but has no capture backend yet.
 | Ctrl+1 … 9 | Load preset 1–9 |
 | Esc | Exit fullscreen / close settings |
 
-Settings are saved to `%APPDATA%\capview\settings.json` one second after each change. Presets live in `presets\` and imported images in `images\` in the same folder.
+Settings are saved to `%APPDATA%\MaxCap\settings.json` one second after each change. Presets live in `presets\` and imported images in `images\` in the same folder.
 
 
 ## How it works
@@ -108,13 +108,13 @@ capture thread (MMCSS "Capture")            render thread (winit)
 
 | Env var | Effect |
 | --- | --- |
-| `CAPVIEW_SMOKE=<secs>` | Log stats every second, screenshot at 3 s, exit. Never writes settings. |
-| `CAPVIEW_SMOKE_UI=1` \| `panel` | Open the settings panel (+ stats HUD unless `panel`). |
-| `CAPVIEW_DEVICE=<substring>` | Force a device by name. |
-| `CAPVIEW_FORMAT=<key>` | Force a mode, e.g. `YUY2 1920x1080@60/1`. |
-| `CAPVIEW_SHOT_PATH=<file>` | Screenshot destination. |
-| `CAPVIEW_NO_SOURCE=1` | Open no device (UI screenshots). |
-| `CAPVIEW_CONFIG_DIR=<folder>` | Use a separate settings/presets/images folder. |
+| `MAXCAP_SMOKE=<secs>` | Log stats every second, screenshot at 3 s, exit. Never writes settings. |
+| `MAXCAP_SMOKE_UI=1` \| `panel` | Open the settings panel (+ stats HUD unless `panel`). |
+| `MAXCAP_DEVICE=<substring>` | Force a device by name. |
+| `MAXCAP_FORMAT=<key>` | Force a mode, e.g. `YUY2 1920x1080@60/1`. |
+| `MAXCAP_SHOT_PATH=<file>` | Screenshot destination. |
+| `MAXCAP_NO_SOURCE=1` | Open no device (UI screenshots). |
+| `MAXCAP_CONFIG_DIR=<folder>` | Use a separate settings/presets/images folder. |
 
 ## Credits
 

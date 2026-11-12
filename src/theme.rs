@@ -357,11 +357,11 @@ pub fn dashed_rule(ui: &mut Ui) {
     }
 }
 
-/// "CAP■VIEW." wordmark.
+/// "MAX■CAP." wordmark.
 pub fn wordmark(ui: &mut Ui, size: f32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label(RichText::new("CAP").font(pixel(size)).color(INK));
+        ui.label(RichText::new("MAX").font(pixel(size)).color(INK));
         let s = size * 0.42;
         let (r, _) = ui.allocate_exact_size(vec2(s + size * 0.16, size), Sense::hover());
         let sq = egui::Rect::from_center_size(
@@ -369,7 +369,7 @@ pub fn wordmark(ui: &mut Ui, size: f32) {
             Vec2::splat(s),
         );
         ui.painter().rect_filled(sq, 0.0, VERMILLION);
-        ui.label(RichText::new("VIEW").font(pixel(size)).color(INK));
+        ui.label(RichText::new("CAP").font(pixel(size)).color(INK));
         ui.label(RichText::new(".").font(pixel(size)).color(VERMILLION));
     });
 }

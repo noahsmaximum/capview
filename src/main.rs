@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! capview — low-latency, high-quality USB capture card viewer.
+//! MaxCap — low-latency, high-quality USB capture card viewer.
 
 mod assets;
 mod audio;
@@ -98,7 +98,7 @@ struct App {
     pacer_sent: Option<Instant>,
     last_idle_redraw: Instant,
     last_render: Instant,
-    /// CAPVIEW_SMOKE=<secs>: log stats, screenshot at 3 s, exit after N s.
+    /// MAXCAP_SMOKE=<secs>: log stats, screenshot at 3 s, exit after N s.
     smoke: Option<(Instant, f32, bool, Instant)>,
     /// Settings as of the previous frame: auto-save waits for 1 s without changes.
     last_seen: Settings,
@@ -114,10 +114,10 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         let mut settings = Settings::load();
-        let smoke_ui = std::env::var_os("CAPVIEW_SMOKE_UI").is_some();
+        let smoke_ui = std::env::var_os("MAXCAP_SMOKE_UI").is_some();
         if smoke_ui {
-            // CAPVIEW_SMOKE_UI=panel shows only the settings card (README screenshots).
-            settings.show_stats = std::env::var("CAPVIEW_SMOKE_UI").as_deref() != Ok("panel");
+            // MAXCAP_SMOKE_UI=panel shows only the settings card (README screenshots).
+            settings.show_stats = std::env::var("MAXCAP_SMOKE_UI").as_deref() != Ok("panel");
         }
         let proxy_for_assets = proxy.clone();
         let pacer = spawn_pacer(proxy.clone());
@@ -173,7 +173,7 @@ impl App {
             active_preset: None,
             presets_scanned: Instant::now(),
             preset_name: String::new(),
-            smoke: std::env::var("CAPVIEW_SMOKE")
+            smoke: std::env::var("MAXCAP_SMOKE")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
                 .map(|secs| (Instant::now(), secs, false, Instant::now())),
@@ -202,7 +202,7 @@ impl App {
         let adapter_formats =
             adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("capview"),
+            label: Some("MaxCap"),
             required_features: adapter_formats,
             required_limits: wgpu::Limits {
                 max_texture_dimension_2d: 8192,
@@ -341,8 +341,8 @@ impl App {
 
     /// Pick / reopen the capture device according to settings.
     fn sync_capture(&mut self) {
-        // Test hook: CAPVIEW_NO_SOURCE=1 leaves every device closed (UI screenshots).
-        if std::env::var_os("CAPVIEW_NO_SOURCE").is_some() {
+        // Test hook: MAXCAP_NO_SOURCE=1 leaves every device closed (UI screenshots).
+        if std::env::var_os("MAXCAP_NO_SOURCE").is_some() {
             return;
         }
         let Some(cap) = &self.capture else { return };
@@ -350,8 +350,8 @@ impl App {
         if devices.is_empty() {
             return;
         }
-        // Test override (smoke runs): CAPVIEW_DEVICE=<name substring>.
-        if let Ok(want) = std::env::var("CAPVIEW_DEVICE") {
+        // Test override (smoke runs): MAXCAP_DEVICE=<name substring>.
+        if let Ok(want) = std::env::var("MAXCAP_DEVICE") {
             let want = want.to_lowercase();
             if let Some(d) = devices
                 .iter()
@@ -360,7 +360,7 @@ impl App {
                 if self.settings.device_link.as_ref() != Some(&d.link) {
                     self.settings.device_link = Some(d.link.clone());
                     self.settings.device_name = Some(d.name.clone());
-                    self.settings.format_key = std::env::var("CAPVIEW_FORMAT").ok();
+                    self.settings.format_key = std::env::var("MAXCAP_FORMAT").ok();
                 }
             }
         }
@@ -596,9 +596,9 @@ impl App {
         let rgb = shot.read_rgb8();
         let (w, h) = (shot.width, shot.height);
         let dir = self.settings.screenshot_dir();
-        let path = match std::env::var("CAPVIEW_SHOT_PATH") {
+        let path = match std::env::var("MAXCAP_SHOT_PATH") {
             Ok(p) => std::path::PathBuf::from(p),
-            Err(_) => dir.join(format!("capview_{}.png", timestamp())),
+            Err(_) => dir.join(format!("maxcap_{}.png", timestamp())),
         };
         log::info!("screenshot -> {}", path.display());
         self.toast(format!("Saved {}", path.display()));
@@ -1277,7 +1277,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let size = self.settings.window_size.unwrap_or([1280, 720]);
         let attrs = Window::default_attributes()
-            .with_title("capview")
+            .with_title("MaxCap")
             .with_inner_size(winit::dpi::PhysicalSize::new(
                 size[0].max(320),
                 size[1].max(180),
@@ -1523,7 +1523,7 @@ fn main() {
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn"),
     )
     .init();
-    log::info!("capview v{}", env!("CARGO_PKG_VERSION"));
+    log::info!("MaxCap v{}", env!("CARGO_PKG_VERSION"));
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("event loop");

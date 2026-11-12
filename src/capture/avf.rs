@@ -145,11 +145,11 @@ impl Avf {
                             &block,
                         );
                     }
-                    return Err("waiting for camera access — allow capview in the prompt".into());
+                    return Err("waiting for camera access — allow MaxCap in the prompt".into());
                 }
                 _ => {
                     return Err(
-                        "camera access is off — enable capview in System Settings › \
+                        "camera access is off — enable MaxCap in System Settings › \
                                 Privacy & Security › Camera"
                             .into(),
                     );
@@ -224,7 +224,7 @@ impl Avf {
                 DispatchQoS::UserInteractive,
             ));
             let queue = DispatchQueue::new_with_target(
-                "capview.capture",
+                "maxcap.capture",
                 DispatchQueueAttr::SERIAL,
                 Some(&target),
             );
@@ -467,7 +467,7 @@ define_class!(
     // SAFETY: NSObject has no subclassing requirements; we don't implement Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = AllocAnyThread]
-    #[name = "CapviewFrameDelegate"]
+    #[name = "MaxCapFrameDelegate"]
     #[ivars = DelegateIvars]
     pub struct FrameDelegate;
 

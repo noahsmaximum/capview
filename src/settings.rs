@@ -1,4 +1,4 @@
-//! Persistent user settings (JSON in %APPDATA%\capview\settings.json).
+//! Persistent user settings (JSON in %APPDATA%\MaxCap\settings.json).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -427,13 +427,84 @@ impl Default for Settings {
 }
 
 pub fn config_dir() -> PathBuf {
-    // Test hook: isolate settings/presets/images (CAPVIEW_CONFIG_DIR=<folder>).
-    if let Some(d) = std::env::var_os("CAPVIEW_CONFIG_DIR") {
+    // Test hook: isolate settings/presets/images (MAXCAP_CONFIG_DIR=<folder>).
+    if let Some(d) = std::env::var_os("MAXCAP_CONFIG_DIR") {
         return PathBuf::from(d);
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("capview")
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("MaxCap");
+    static MIGRATE: std::sync::Once = std::sync::Once::new();
+    MIGRATE.call_once(|| migrate_legacy_dir(&base.join("capview"), &dir));
+    dir
+}
+
+/// The app was called "capview" before v0.2: move its settings, presets and imported
+/// images into the new folder, and point stored image paths at their new location.
+/// Runs once per launch and only when the new folder doesn't exist yet.
+fn migrate_legacy_dir(old: &std::path::Path, new: &std::path::Path) {
+    if new.exists() || !old.is_dir() {
+        return;
+    }
+    if std::fs::rename(old, new).is_err() {
+        // Something holds the old folder open: copy instead, into a staging folder that is
+        // renamed into place only when complete, so a failed copy never leaves a half-filled
+        // new folder that would block the next launch from retrying.
+        let staging = new.with_extension("migrating");
+        let _ = std::fs::remove_dir_all(&staging);
+        if let Err(e) = copy_dir(old, &staging).and_then(|_| std::fs::rename(&staging, new)) {
+            let _ = std::fs::remove_dir_all(&staging);
+            log::warn!("couldn't migrate settings from {}: {e}", old.display());
+            return;
+        }
+    }
+    log::info!("migrated settings from {} to {}", old.display(), new.display());
+    let (old_s, new_s) = (old.to_string_lossy(), new.to_string_lossy());
+    let mut files = vec![new.join("settings.json")];
+    if let Ok(rd) = std::fs::read_dir(new.join("presets")) {
+        files.extend(rd.flatten().map(|e| e.path()));
+    }
+    for f in files.iter().filter(|f| f.extension().is_some_and(|x| x == "json")) {
+        let Ok(text) = std::fs::read_to_string(f) else { continue };
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        if rebase_paths(&mut v, &old_s, &new_s)
+            && let Ok(out) = serde_json::to_string_pretty(&v)
+        {
+            let _ = std::fs::write(f, out);
+        }
+    }
+}
+
+/// Rewrite every string under `v` that starts with the old folder. Returns true if any did.
+fn rebase_paths(v: &mut serde_json::Value, old: &str, new: &str) -> bool {
+    match v {
+        serde_json::Value::String(s) => {
+            let hit = s.len() >= old.len()
+                && s.is_char_boundary(old.len())
+                && s[..old.len()].eq_ignore_ascii_case(old)
+                && matches!(s[old.len()..].chars().next(), None | Some('\\' | '/'));
+            if hit {
+                *s = format!("{new}{}", &s[old.len()..]);
+            }
+            hit
+        }
+        serde_json::Value::Array(a) => a.iter_mut().fold(false, |h, x| rebase_paths(x, old, new) | h),
+        serde_json::Value::Object(o) => o.values_mut().fold(false, |h, x| rebase_paths(x, old, new) | h),
+        _ => false,
+    }
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dst = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &dst)?;
+        } else {
+            std::fs::copy(e.path(), dst)?;
+        }
+    }
+    Ok(())
 }
 
 fn settings_path() -> PathBuf {
@@ -449,7 +520,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        if std::env::var_os("CAPVIEW_SMOKE").is_some() {
+        if std::env::var_os("MAXCAP_SMOKE").is_some() {
             return; // test runs never touch the user's settings
         }
         let dir = config_dir();
@@ -513,12 +584,12 @@ impl Settings {
         }
         dirs::picture_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("capview")
+            .join("MaxCap")
     }
 }
 
 // ---------------------------------------------------------------------------------
-// Presets: %APPDATA%\capview\presets\<name>.json
+// Presets: %APPDATA%\MaxCap\presets\<name>.json
 
 pub fn presets_dir() -> PathBuf {
     config_dir().join("presets")
@@ -555,7 +626,7 @@ struct PresetFile {
     settings: Settings,
 }
 
-/// Accepts capview preset files, and plain settings JSON (e.g. a copied settings.json).
+/// Accepts MaxCap preset files, and plain settings JSON (e.g. a copied settings.json).
 fn parse_preset(text: &str) -> Option<(String, Settings)> {
     if let Ok(p) = serde_json::from_str::<PresetFile>(text) {
         return Some((p.name, p.settings));
@@ -638,10 +709,10 @@ mod tests {
 
     #[test]
     fn preset_roundtrip_rename_and_plain_settings() {
-        let dir = std::env::temp_dir().join(format!("capview_preset_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("maxcap_preset_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: only this test touches CAPVIEW_CONFIG_DIR.
-        unsafe { std::env::set_var("CAPVIEW_CONFIG_DIR", &dir) };
+        // SAFETY: only this test touches MAXCAP_CONFIG_DIR.
+        unsafe { std::env::set_var("MAXCAP_CONFIG_DIR", &dir) };
 
         let mut mine = Settings::default();
         mine.device_name = Some("USB3 Video".into());
@@ -697,5 +768,38 @@ mod tests {
         }
         assert!(list_presets().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_dir_migrates_and_rebases_image_paths() {
+        let root = std::env::temp_dir().join(format!("maxcap_migrate_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("capview"), root.join("MaxCap"));
+        std::fs::create_dir_all(old.join("presets")).unwrap();
+        std::fs::create_dir_all(old.join("images")).unwrap();
+        std::fs::write(old.join("images").join("bg.jpg"), b"x").unwrap();
+        let img = old.join("images").join("bg.jpg").to_string_lossy().into_owned();
+        let elsewhere = root.join("capview-other").join("a.png").to_string_lossy().into_owned();
+        let preset = serde_json::json!({ "background_image": img, "frame_image": elsewhere });
+        std::fs::write(old.join("presets").join("P.json"), preset.to_string()).unwrap();
+        std::fs::write(old.join("settings.json"), r#"{"background_image": null}"#).unwrap();
+
+        migrate_legacy_dir(&old, &new);
+
+        assert!(!old.exists());
+        assert!(new.join("images").join("bg.jpg").exists());
+        let p: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(new.join("presets").join("P.json")).unwrap()).unwrap();
+        let want = new.join("images").join("bg.jpg").to_string_lossy().into_owned();
+        assert_eq!(p["background_image"], serde_json::json!(want));
+        // A sibling folder that merely shares the prefix is left alone.
+        assert_eq!(p["frame_image"], serde_json::json!(elsewhere));
+
+        // Never overwrites an existing new folder.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("settings.json"), "{}").unwrap();
+        migrate_legacy_dir(&old, &new);
+        assert!(old.join("settings.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

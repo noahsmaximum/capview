@@ -439,10 +439,10 @@ mod tests {
         assert!(hiss_drop > 12.0, "hiss under signal should drop by >12 dB");
     }
 
-    /// Optional: run against a real capture. `CAPVIEW_TEST_PCM=<s16le stereo 48k file>`
+    /// Optional: run against a real capture. `MAXCAP_TEST_PCM=<s16le stereo 48k file>`
     #[test]
     fn real_capture_if_provided() {
-        let Ok(path) = std::env::var("CAPVIEW_TEST_PCM") else { return };
+        let Ok(path) = std::env::var("MAXCAP_TEST_PCM") else { return };
         let bytes = std::fs::read(path).unwrap();
         let input: Vec<[f32; 2]> = bytes
             .chunks_exact(4)

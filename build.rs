@@ -5,7 +5,7 @@ fn main() {
 
 /// Compile the NGX shim against the RTX Video SDK and put the VSR runtime next to the
 /// exe. The SDK is NVIDIA-licensed and never lives in this repo: point NV_RTX_VIDEO_SDK
-/// at it, or unpack it to ./capview-deps/rtx-video-sdk (gitignored).
+/// at it, or unpack it to ./maxcap-deps/rtx-video-sdk (gitignored).
 #[cfg(feature = "rtx-video")]
 fn rtx_video() {
     use std::path::PathBuf;
@@ -17,7 +17,7 @@ fn rtx_video() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let sdk = std::env::var_os("NV_RTX_VIDEO_SDK")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest.join("capview-deps").join("rtx-video-sdk"));
+        .unwrap_or_else(|| manifest.join("maxcap-deps").join("rtx-video-sdk"));
     if !sdk.join("include").join("nvsdk_ngx_helpers_vsr.h").exists() {
         panic!(
             "rtx-video: RTX Video SDK not found at {} (set NV_RTX_VIDEO_SDK)",
@@ -36,7 +36,7 @@ fn rtx_video() {
         .static_crt(true) // matches .cargo/config.toml (+crt-static) and nvsdk_ngx_s.lib
         .flag_if_supported("/std:c++17")
         .flag_if_supported("/EHsc")
-        .compile("capview_ngx_shim");
+        .compile("maxcap_ngx_shim");
 
     let lib = sdk.join("lib").join("Windows").join(arch);
     println!("cargo:rustc-link-search=native={}", lib.display());
@@ -46,7 +46,7 @@ fn rtx_video() {
     }
 
     // NGX loads nvngx_vsr.dll from the exe's folder. OUT_DIR is
-    // target/<profile>/build/capview-<hash>/out, so the exe dir is three levels up.
+    // target/<profile>/build/maxcap-<hash>/out, so the exe dir is three levels up.
     let dll = sdk
         .join("bin")
         .join("Windows")

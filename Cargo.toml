@@ -1,10 +1,10 @@
 [package]
-name = "capview"
-version = "0.1.3"
+name = "maxcap"
+version = "0.2.0"
 edition = "2024"
 description = "Low-latency, high-quality USB capture card viewer"
 license = "MIT"
-repository = "https://github.com/noahsmaximum/capview"
+repository = "https://github.com/noahsmaximum/maxcap"
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -29,7 +29,7 @@ winit = "0.30"
 
 [features]
 # NVIDIA RTX Video Super Resolution (Windows, RTX GPUs). Needs the RTX Video SDK on the
-# build machine: set NV_RTX_VIDEO_SDK, or unpack it to ./capview-deps/rtx-video-sdk.
+# build machine: set NV_RTX_VIDEO_SDK, or unpack it to ./maxcap-deps/rtx-video-sdk.
 rtx-video = ["dep:cc"]
 
 [build-dependencies]

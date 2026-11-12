@@ -27,12 +27,12 @@ jobs:
         run: |
           $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory -Force dist/pkg/licenses | Out-Null
-          Copy-Item target/release/capview.exe, README.md, LICENSE dist/pkg/
+          Copy-Item target/release/maxcap.exe, README.md, LICENSE dist/pkg/
           Copy-Item assets/fonts/OFL-*.txt dist/pkg/licenses/
-          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/capview-v$v-windows-x64.zip" -Force
+          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/maxcap-v$v-windows-x64.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
-          name: capview-windows
+          name: maxcap-windows
           path: dist/*.zip
       # The Windows release zip is built locally by packaging/windows/package.ps1,
       # because RTX Video needs the NVIDIA SDK, which can't live in this repo.
@@ -49,7 +49,7 @@ jobs:
       - run: bash packaging/macos/bundle.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: capview-macos
+          name: maxcap-macos
           path: dist/*.zip
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')

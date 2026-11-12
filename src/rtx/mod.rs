@@ -18,15 +18,15 @@ use windows::core::Interface;
 type Dx12 = wgpu::hal::api::Dx12;
 
 unsafe extern "C" {
-    fn cv_ngx_init(device: *mut c_void, data_path: *const u16) -> i32;
-    fn cv_ngx_vsr_caps(
+    fn mc_ngx_init(device: *mut c_void, data_path: *const u16) -> i32;
+    fn mc_ngx_vsr_caps(
         available: *mut i32,
         needs_driver: *mut i32,
         min_major: *mut u32,
         min_minor: *mut u32,
     ) -> i32;
-    fn cv_ngx_vsr_create(list: *mut c_void, out: *mut *mut c_void) -> i32;
-    fn cv_ngx_vsr_eval(
+    fn mc_ngx_vsr_create(list: *mut c_void, out: *mut *mut c_void) -> i32;
+    fn mc_ngx_vsr_eval(
         list: *mut c_void,
         handle: *mut c_void,
         input: *mut c_void,
@@ -35,8 +35,8 @@ unsafe extern "C" {
         out_rect: *const u32,
         quality: i32,
     ) -> i32;
-    fn cv_ngx_vsr_release(handle: *mut c_void);
-    fn cv_ngx_shutdown(device: *mut c_void);
+    fn mc_ngx_vsr_release(handle: *mut c_void);
+    fn mc_ngx_shutdown(device: *mut c_void);
 }
 
 fn ngx_ok(r: i32) -> bool {
@@ -87,7 +87,7 @@ impl Vsr {
             .encode_utf16()
             .chain(Some(0))
             .collect();
-        let r = unsafe { cv_ngx_init(raw_device.as_raw(), wide.as_ptr()) };
+        let r = unsafe { mc_ngx_init(raw_device.as_raw(), wide.as_ptr()) };
         if !ngx_ok(r) {
             return Err(format!(
                 "needs an NVIDIA RTX GPU and driver (NGX init 0x{:08X})",
@@ -95,9 +95,9 @@ impl Vsr {
             ));
         }
         let (mut avail, mut needs, mut maj, mut min) = (0, 0, 0u32, 0u32);
-        unsafe { cv_ngx_vsr_caps(&mut avail, &mut needs, &mut maj, &mut min) };
+        unsafe { mc_ngx_vsr_caps(&mut avail, &mut needs, &mut maj, &mut min) };
         if avail == 0 {
-            unsafe { cv_ngx_shutdown(raw_device.as_raw()) };
+            unsafe { mc_ngx_shutdown(raw_device.as_raw()) };
             return Err(if needs != 0 {
                 format!("update the NVIDIA driver (needs {maj}.{min} or newer)")
             } else {
@@ -115,7 +115,7 @@ impl Vsr {
             slot.list
                 .Reset(&slot.alloc, None)
                 .map_err(|e| e.to_string())?;
-            let r = cv_ngx_vsr_create(slot.list.as_raw(), &mut vsr.handle);
+            let r = mc_ngx_vsr_create(slot.list.as_raw(), &mut vsr.handle);
             slot.list.Close().map_err(|e| e.to_string())?;
             r
         };
@@ -264,7 +264,7 @@ impl Vsr {
             transition(&s.list, &[(&inp, rt, common), (&out, rt, common)]);
             s.list
                 .EndQuery(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, q);
-            let r = cv_ngx_vsr_eval(
+            let r = mc_ngx_vsr_eval(
                 s.list.as_raw(),
                 self.handle,
                 inp.as_raw(),
@@ -349,8 +349,8 @@ impl Drop for Vsr {
     fn drop(&mut self) {
         self.wait_idle();
         unsafe {
-            cv_ngx_vsr_release(self.handle);
-            cv_ngx_shutdown(self.device.as_raw());
+            mc_ngx_vsr_release(self.handle);
+            mc_ngx_shutdown(self.device.as_raw());
             let _ = CloseHandle(self.event);
         }
     }
